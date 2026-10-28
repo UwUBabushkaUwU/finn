@@ -288,31 +288,43 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
         else None
     )
 
-    # Sanity check reconciliation: PBT − total tax (+ associates if printed after tax) ≈ total PAT within 2%
-    pbt_curr = pbt["current"]
-    tax_curr = tax["current"]
-    total_pat_curr = pat_total["current"]
-    assoc_curr = share_associates["current"] or 0.0
+    # Sanity check reconciliation across all three columns (current, previous quarter, year ago)
+    column_diffs: dict[str, float] = {}
+    all_columns_passed = True
+    max_diff = 0.0
 
-    verified = True
-    check_diff = 0.0
-    if pbt_curr is not None and total_pat_curr is not None:
+    for col in ("current", "previous_quarter", "year_ago"):
+        pbt_val = pbt.get(col)
+        pat_val = pat_total.get(col)
+        tax_val = tax.get(col)
+        assoc_val = share_associates.get(col) or 0.0
+
+        if pbt_val is None or pat_val is None:
+            continue
+
         candidates = []
-        if tax_curr is not None:
+        if tax_val is not None:
             # Handle both standard tax expense: PBT - |tax|, and tax credit: PBT - tax,
             # with associates either after tax (+ assoc) or before tax / already inside PBT
-            for t_val in (abs(tax_curr), tax_curr):
-                candidates.append(abs((pbt_curr - t_val) - total_pat_curr))
-                if assoc_curr:
-                    candidates.append(abs((pbt_curr - t_val + assoc_curr) - total_pat_curr))
+            for t_val in (abs(tax_val), tax_val):
+                candidates.append(abs((pbt_val - t_val) - pat_val))
+                if assoc_val:
+                    candidates.append(abs((pbt_val - t_val + assoc_val) - pat_val))
         else:
-            candidates.append(abs(pbt_curr - total_pat_curr))
-            if assoc_curr:
-                candidates.append(abs((pbt_curr + assoc_curr) - total_pat_curr))
+            candidates.append(abs(pbt_val - pat_val))
+            if assoc_val:
+                candidates.append(abs((pbt_val + assoc_val) - pat_val))
 
-        check_diff = min(candidates)
-        tolerance = 0.02 * max(abs(total_pat_curr), 1.0)
-        verified = check_diff <= tolerance
+        col_diff = min(candidates)
+        column_diffs[col] = round(col_diff, 2)
+        max_diff = max(max_diff, col_diff)
+
+        tolerance = 0.02 * max(abs(pat_val), 1.0)
+        if col_diff > tolerance:
+            all_columns_passed = False
+
+    verified = all_columns_passed
+    check_diff = max_diff
 
     headline = build_headline(rev_yoy, pat_yoy)
 
@@ -385,6 +397,7 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
             "associates_after_tax": associates_after_tax,
             "is_lender": is_lender,
             "verified": verified,
+            "column_diffs": column_diffs,
             "check_diff": round(check_diff, 2),
             "page": raw_data.get("page"),
             "source_pdf_url": source_pdf_url,
@@ -513,6 +526,36 @@ def enrich_results_event(main_filing: dict[str, Any], prompt_template: str) -> d
                 logger.info("[%s] Results statement found on page %s (%s)", ticker, extracted.get("page"), extracted.get("basis"))
                 processed = process_results_data(extracted, url)
 
+                # If reconciliation fails across any column, retry extraction once with reasoning model and no cache
+                if not processed["results"]["verified"]:
+                    logger.warning(
+                        "[%s] Reconciliation failed on at least one column (diffs=%s). Retrying extraction once with reasoning model and no cache...",
+                        ticker,
+                        processed["results"].get("column_diffs"),
+                    )
+                    try:
+                        retry_extracted = call_json(
+                            task="reasoning",
+                            prompt=prompt_template,
+                            prompt_version="v2",
+                            pdf_bytes=trimmed_bytes,
+                            use_cache=False,
+                        )
+                        if isinstance(retry_extracted, dict) and retry_extracted.get("found") is True:
+                            retry_processed = process_results_data(retry_extracted, url)
+                            if retry_processed["results"]["verified"]:
+                                logger.info("[%s] Reconciliation succeeded on live retry!", ticker)
+                                processed = retry_processed
+                            else:
+                                logger.warning(
+                                    "[%s] Reconciliation still failed after live retry (diffs=%s). Keeping verified: false.",
+                                    ticker,
+                                    retry_processed["results"].get("column_diffs"),
+                                )
+                                processed = retry_processed
+                    except Exception as retry_exc:
+                        logger.error("[%s] Error during live retry extraction: %s", ticker, retry_exc)
+
                 # Persist to database
                 client = get_client()
                 enr = main_filing.get("enrichment") or {}
@@ -623,15 +666,36 @@ def print_summary_table(records: list[dict[str, Any]]) -> None:
             diff_st = item.get("check_diff", 0)
             print(f"  • {t:<10} verified: {item.get('verified')} (diff: ₹{diff_st} cr, PBT={pbt_val}, Total PAT={tot_pat}, Assoc={assoc})")
 
-    # 3. Nazara's revenue for all three columns with period labels exactly as printed
+    # 3. Nazara's revenue and PAT for all three columns with period labels exactly as printed
     if "NAZARA" in by_ticker:
         n = by_ticker["NAZARA"]
         np = n.get("periods", {})
-        nm = n.get("metrics", {}).get("revenue", {})
+        nm = n.get("metrics", {})
+        n_rev = nm.get("revenue", {})
+        n_pat_tot = nm.get("pat_total", {})
+        n_pat_own = nm.get("pat_attributable_to_owners", {})
+
         print("  • NAZARA Revenue Columns (as printed):")
-        print(f"      Current          [{np.get('current')}]:           ₹{nm.get('current')} cr")
-        print(f"      Previous Quarter [{np.get('previous_quarter')}]:  ₹{nm.get('previous_quarter')} cr")
-        print(f"      Year Ago         [{np.get('year_ago')}]:          ₹{nm.get('year_ago')} cr")
+        print(f"      Current          [{np.get('current')}]:           ₹{n_rev.get('current')} cr")
+        print(f"      Previous Quarter [{np.get('previous_quarter')}]:  ₹{n_rev.get('previous_quarter')} cr")
+        print(f"      Year Ago         [{np.get('year_ago')}]:          ₹{n_rev.get('year_ago')} cr")
+
+        print("  • NAZARA PAT Columns (Total vs Attributable as printed):")
+        for col, col_lbl in [("current", "Current"), ("previous_quarter", "Previous Quarter"), ("year_ago", "Year Ago")]:
+            p_label = np.get(col, "")
+            tot_v = n_pat_tot.get(col)
+            own_v = n_pat_own.get(col)
+            print(f"      {col_lbl:<16} [{p_label}]: Total PAT = ₹{tot_v} cr, Attributable PAT = ₹{own_v} cr")
+
+    # 4. Companies not verified
+    unverified = [t for t, r in by_ticker.items() if not r.get("verified")]
+    if unverified:
+        print(f"\n  • COMPANIES NOT VERIFIED: {', '.join(unverified)}")
+        for uv in unverified:
+            r = by_ticker[uv]
+            print(f"      {uv:<12}: column_diffs = {r.get('column_diffs')} (tolerance: 2%)")
+    else:
+        print("\n  • COMPANIES NOT VERIFIED: None (all 12 companies verified)")
 
     print("=" * 115 + "\n")
 
