@@ -111,7 +111,7 @@ export function groupFilingsIntoEvents(
     const primaryFiling = sortedCluster[0];
     const secondaryFilings = sortedCluster.slice(1);
 
-    const headline = primaryFiling.summary?.trim() || primaryFiling.subject;
+    let headline = primaryFiling.summary?.trim() || primaryFiling.subject;
     const category = formatCategory(primaryFiling.category);
     const company = companiesMap[cluster.ticker];
     const companyName = company?.name || cluster.ticker;
@@ -131,6 +131,34 @@ export function groupFilingsIntoEvents(
       (f) => f.enrichment?.results && f.enrichment.results.metrics
     );
     const resultsEnrichment = resultsFiling?.enrichment?.results || null;
+
+    // Headline: if an event has enrichment.results and its main filing’s category is results or press_release,
+    // use the computed results headline
+    const primaryCat = (primaryFiling.category || "").toLowerCase();
+    if (
+      resultsEnrichment &&
+      (primaryCat === "results" || primaryCat === "press_release")
+    ) {
+      if (resultsFiling?.summary?.trim() && resultsFiling.summary.includes("YoY")) {
+        headline = resultsFiling.summary.trim();
+      } else {
+        const rev = resultsEnrichment.metrics?.revenue;
+        const pat = resultsEnrichment.metrics?.pat;
+        const revSign = (rev?.yoy_pct ?? 0) >= 0 ? "+" : "−";
+        const patSign = (pat?.yoy_pct ?? 0) >= 0 ? "+" : "−";
+        const revStr = rev?.yoy_label
+          ? `Revenue ${rev.yoy_label}`
+          : rev?.yoy_pct != null
+          ? `Revenue ${revSign}${Math.abs(Math.round(rev.yoy_pct))}% YoY`
+          : "Revenue steady YoY";
+        const patStr = pat?.yoy_label
+          ? `PAT ${pat.yoy_label}`
+          : pat?.yoy_pct != null
+          ? `PAT ${patSign}${Math.abs(Math.round(pat.yoy_pct))}% YoY`
+          : "PAT steady YoY";
+        headline = `${revStr}, ${patStr}`;
+      }
+    }
 
     // Look for people enrichment in any filing in this cluster
     const peopleFiling = sortedCluster.find(

@@ -793,6 +793,74 @@ def enrich_mgmt_filing(
     }
 
 
+def propagate_bios_across_filings(records: list[dict[str, Any]] | None = None) -> None:
+    """If a person has no bio but the same name (same ticker) has a bio in another filing, reuse that bio and its source."""
+    client = get_client()
+
+    # Query all management filings with enrichment->people
+    try:
+        db_res = (
+            client.table("filings")
+            .select("id, ticker, enrichment")
+            .eq("category", "management_change")
+            .not_.is_("enrichment->people", "null")
+            .execute()
+        )
+        all_filings = db_res.data or []
+    except Exception as exc:
+        logger.warning("Error fetching management filings from database: %s", exc)
+        all_filings = []
+
+    # 1. Map ticker -> cleaned_name_lower -> (bio, bio_source)
+    known_bios: dict[str, dict[str, tuple[str, str]]] = {}
+    for row in all_filings:
+        ticker = row.get("ticker")
+        if not ticker:
+            continue
+        people = (row.get("enrichment") or {}).get("people") or []
+        for p in people:
+            norm_name = clean_person_name(p.get("name") or "").lower()
+            bio = p.get("bio")
+            src = p.get("bio_source")
+            if norm_name and bio:
+                known_bios.setdefault(ticker, {})[norm_name] = (bio.strip(), src or "filing")
+
+    # 2. Check each filing and fill in missing bios
+    updated_count = 0
+    for row in all_filings:
+        ticker = row.get("ticker")
+        ticker_bios = known_bios.get(ticker, {})
+        if not ticker_bios:
+            continue
+        enr = row.get("enrichment") or {}
+        people = enr.get("people") or []
+        row_updated = False
+        for p in people:
+            if not p.get("bio"):
+                norm_name = clean_person_name(p.get("name") or "").lower()
+                if norm_name in ticker_bios:
+                    p["bio"], p["bio_source"] = ticker_bios[norm_name]
+                    logger.info("[%s] Reused bio for '%s' in filing %s (%s)", ticker, p.get("name"), row["id"], ticker_bios[norm_name][1])
+                    row_updated = True
+        if row_updated:
+            enr["people"] = people
+            client.table("filings").update({"enrichment": enr}).eq("id", row["id"]).execute()
+            updated_count += 1
+
+    # Also update in-memory records if passed
+    if records:
+        for r in records:
+            ticker = r.get("ticker")
+            ticker_bios = known_bios.get(ticker, {})
+            for p in (r.get("people") or []):
+                if not p.get("bio"):
+                    norm_name = clean_person_name(p.get("name") or "").lower()
+                    if norm_name in ticker_bios:
+                        p["bio"], p["bio_source"] = ticker_bios[norm_name]
+
+    logger.info("Bio cross-filing propagation complete. Updated %d filing(s).", updated_count)
+
+
 def run_pipeline(lookback_days: int = 45, force: bool = False) -> list[dict[str, Any]]:
     """Execute management change enrichment pipeline."""
     mgmt_prompt, bio_prompt = load_prompt_templates()
@@ -807,6 +875,9 @@ def run_pipeline(lookback_days: int = 45, force: bool = False) -> list[dict[str,
                 results.append(res)
         except Exception as exc:
             logger.error("Failed processing management change for %s (%s): %s", f.get("ticker"), f.get("id"), exc)
+
+    # Reuse bios across filings for the same person at the same ticker
+    propagate_bios_across_filings(results)
 
     # Check and apply 7-day duplicate resolution
     deduplicate_filings(results)

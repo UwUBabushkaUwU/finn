@@ -7,17 +7,17 @@ interface ResultsBlockProps {
 
 function formatChange(pct?: number | null, label?: string | null) {
   if (label) {
-    if (label.toLowerCase() === "turned profitable") {
+    if (label.toLowerCase().includes("profitable")) {
       return (
         <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-          profitable
+          from loss
         </span>
       );
     }
-    if (label.toLowerCase() === "turned to loss") {
+    if (label.toLowerCase().includes("loss")) {
       return (
         <span className="text-red-600 dark:text-red-400 font-medium">
-          loss
+          to loss
         </span>
       );
     }
@@ -131,7 +131,7 @@ export function ResultsBlock({ results, isAlso = false }: ResultsBlockProps) {
   const needsCheck = results.check === true || results.verified === false;
 
   return (
-    <div className="mt-2.5 p-2.5 rounded bg-neutral-50/80 dark:bg-neutral-800/40 border border-neutral-200/80 dark:border-neutral-750/70 text-xs">
+    <div className="mt-2.5 p-2.5 rounded bg-neutral-50/80 dark:bg-neutral-800/40 border border-neutral-200/80 dark:border-neutral-800 text-xs">
       {isAlso && (
         <div className="text-[10px] font-mono uppercase font-bold tracking-wider text-neutral-500 dark:text-neutral-400 mb-1.5 pb-1 border-b border-neutral-200/60 dark:border-neutral-800">
           Also: {qLabel} results
@@ -141,7 +141,7 @@ export function ResultsBlock({ results, isAlso = false }: ResultsBlockProps) {
       {/* 4-Row Table */}
       <table className="w-full text-xs border-collapse">
         <thead>
-          <tr className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500 border-b border-neutral-200 dark:border-neutral-750">
+          <tr className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500 border-b border-neutral-200 dark:border-neutral-800">
             <th className="py-1 pr-2 text-left font-semibold">Metric</th>
             <th className="py-1 px-2 text-right font-semibold">This Qtr (₹ cr)</th>
             <th className="py-1 px-2 text-right font-semibold">QoQ %</th>

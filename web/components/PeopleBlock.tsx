@@ -53,11 +53,11 @@ export function PeopleBlock({ people, companyName }: PeopleBlockProps) {
         return (
           <div
             key={`${person.name}-${idx}`}
-            className="p-2 rounded bg-neutral-50/70 dark:bg-neutral-850/50 border border-neutral-200/70 dark:border-neutral-800 text-xs"
+            className="p-2.5 rounded bg-neutral-50/80 dark:bg-neutral-800/40 border border-neutral-200/80 dark:border-neutral-800 text-xs"
           >
             {/* Header: Name (bold), role, change, effective date */}
             <div className="leading-snug">
-              <span className="font-bold text-neutral-950 dark:text-neutral-50">
+              <span className="font-bold text-neutral-900 dark:text-neutral-100">
                 {person.name}
               </span>
               <span className="text-neutral-500 dark:text-neutral-400 mx-1.5">·</span>

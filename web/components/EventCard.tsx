@@ -20,7 +20,8 @@ export function EventCard({ event, isCompact = false }: EventCardProps) {
   // Determine if results block should have "Also: Q2 results" prefix
   const isSecondaryResults =
     Boolean(event.resultsEnrichment) &&
-    event.category.toLowerCase() !== "results";
+    event.primaryFiling.category?.toLowerCase() !== "results" &&
+    event.primaryFiling.category?.toLowerCase() !== "press_release";
 
   // Noise filter for Details box
   const hasValidDescription =
@@ -37,33 +38,34 @@ export function EventCard({ event, isCompact = false }: EventCardProps) {
           : "border-neutral-200 dark:border-neutral-800/80 bg-neutral-50/40 dark:bg-neutral-900/40 hover:bg-white dark:hover:bg-neutral-900"
       } ${isCompact ? "p-2.5" : "p-3"}`}
     >
-      {/* Header row: Ticker, Company, Category Chips, Time */}
-      <div className="flex items-center gap-2 justify-between">
-        <div className="flex items-baseline gap-1.5 min-w-0">
-          <span className="font-mono font-bold text-sm tracking-tight text-neutral-950 dark:text-neutral-50">
+      {/* Header Row 1: Ticker, Company Name (truncate with …), Time */}
+      <div className="flex items-baseline justify-between gap-2 min-w-0">
+        <div className="flex items-baseline gap-1.5 min-w-0 flex-1">
+          <span className="font-mono font-bold text-sm tracking-tight text-neutral-950 dark:text-neutral-50 shrink-0">
             {event.ticker}
           </span>
-          <span className="text-xs text-neutral-500 dark:text-neutral-400 truncate max-w-[120px] sm:max-w-[200px]">
+          <span className="text-xs text-neutral-500 dark:text-neutral-400 truncate">
             {event.companyName}
           </span>
         </div>
+        <time className="text-[11px] font-mono tabular-nums text-neutral-500 dark:text-neutral-400 shrink-0">
+          {formatFilingTime(event.filedAt)}
+        </time>
+      </div>
 
-        <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
-          {(event.categories && event.categories.length > 0
-            ? event.categories
-            : [event.category]
-          ).map((cat) => (
-            <span
-              key={cat}
-              className="inline-block text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.2 rounded border border-neutral-200 dark:border-neutral-700/80 text-neutral-600 dark:text-neutral-300 bg-neutral-100/50 dark:bg-neutral-800/50"
-            >
-              {cat}
-            </span>
-          ))}
-          <time className="text-[11px] font-mono tabular-nums text-neutral-500 dark:text-neutral-400">
-            {formatFilingTime(event.filedAt)}
-          </time>
-        </div>
+      {/* Header Row 2: Category Chips (wrapping onto a new line if needed) */}
+      <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
+        {(event.categories && event.categories.length > 0
+          ? event.categories
+          : [event.category]
+        ).map((cat) => (
+          <span
+            key={cat}
+            className="inline-block text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.2 rounded border border-neutral-200 dark:border-neutral-700/80 text-neutral-600 dark:text-neutral-300 bg-neutral-100/50 dark:bg-neutral-800/50"
+          >
+            {cat}
+          </span>
+        ))}
       </div>
 
       {/* Main Headline */}
