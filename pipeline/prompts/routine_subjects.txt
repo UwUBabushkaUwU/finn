@@ -1,0 +1,9 @@
+# Routine paperwork subjects pre-filtered without calling LLM
+# Priority is set to 3, category = 'unclassified', summary = null
+Copy of Newspaper Publication
+Certificate under SEBI (Depositories and Participants) Regulations, 2018
+Trading Window
+Loss of Share Certificates
+Loss/Duplicate Certificate
+Duplicate Share Certificate
+SEBI depositories certificates
