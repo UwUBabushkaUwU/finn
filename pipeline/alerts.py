@@ -1,6 +1,6 @@
 """Alerts generation pipeline for FINN.
 
-Generates alerts based on:
+Generates alerts for portfolio companies (in_portfolio = true) based on:
 1. Unusual price moves (|pct_change| >= price_move_pct)
 2. Unusual volume spikes (vol_ratio >= volume_multiple)
 3. Material filings (priority 1, within last 48 hours, in alert_categories)
@@ -56,31 +56,56 @@ def load_settings() -> dict[str, Any]:
     return settings
 
 
-def get_latest_prices() -> list[dict[str, Any]]:
-    """Retrieve the latest price row for each company."""
+def get_portfolio_tickers() -> set[str]:
+    """Retrieve tickers of companies currently in the portfolio (in_portfolio = true)."""
+    companies = select("companies", in_portfolio=True)
+    tickers = {c["ticker"] for c in companies if "ticker" in c}
+    return tickers
+
+
+def delete_non_portfolio_alerts(portfolio_tickers: set[str]) -> int:
+    """Delete any existing alerts in the database for non-portfolio companies."""
     client = get_client()
-    companies = select("companies")
-    tickers = [c["ticker"] for c in companies if "ticker" in c]
-    if not tickers:
-        logger.warning("No companies found in companies table.")
+    res = client.table("alerts").select("id, ticker").execute()
+    rows = res.data or []
+    ids_to_delete = [r["id"] for r in rows if r.get("ticker") not in portfolio_tickers]
+    if ids_to_delete:
+        logger.info(
+            "Found %d alerts for non-portfolio companies to delete: IDs %s",
+            len(ids_to_delete),
+            ids_to_delete,
+        )
+        client.table("alerts").delete().in_("id", ids_to_delete).execute()
+    return len(ids_to_delete)
+
+
+def get_latest_prices(portfolio_tickers: set[str]) -> list[dict[str, Any]]:
+    """Retrieve the latest price row for each portfolio company."""
+    if not portfolio_tickers:
+        logger.warning("No portfolio companies provided.")
         return []
 
+    client = get_client()
     # Fetch recent prices ordered by date desc to find the latest row per ticker
     res = client.table("prices").select("*").order("date", desc=True).limit(500).execute()
     latest_by_ticker: dict[str, dict[str, Any]] = {}
     for row in res.data or []:
         t = row.get("ticker")
-        if t and t not in latest_by_ticker:
+        if t in portfolio_tickers and t not in latest_by_ticker:
             latest_by_ticker[t] = row
 
-    # Fallback: if any ticker was not in the top 500 rows, query it directly
-    for t in tickers:
+    # Fallback: if any portfolio ticker was not in the top 500 rows, query it directly
+    for t in portfolio_tickers:
         if t not in latest_by_ticker:
             indiv = client.table("prices").select("*").eq("ticker", t).order("date", desc=True).limit(1).execute()
             if indiv.data:
                 latest_by_ticker[t] = indiv.data[0]
 
-    logger.info("Found latest price rows for %d / %d companies.", len(latest_by_ticker), len(tickers))
+    logger.info(
+        "Found latest price rows for %d / %d portfolio companies.",
+        len(latest_by_ticker),
+        len(portfolio_tickers),
+    )
     return list(latest_by_ticker.values())
 
 
@@ -135,8 +160,10 @@ def build_price_and_volume_alerts(
     return alerts
 
 
-def build_material_filing_alerts(settings: dict[str, Any]) -> list[dict[str, Any]]:
-    """Generate material_filing alert candidates for priority 1 filings in last 48 hours."""
+def build_material_filing_alerts(
+    settings: dict[str, Any], portfolio_tickers: set[str]
+) -> list[dict[str, Any]]:
+    """Generate material_filing alert candidates for priority 1 filings of portfolio companies in last 48 hours."""
     client = get_client()
     raw_categories = settings.get("alert_categories") or []
     # Case-insensitive category set
@@ -159,6 +186,10 @@ def build_material_filing_alerts(settings: dict[str, Any]) -> list[dict[str, Any
     alerts: list[dict[str, Any]] = []
 
     for f in filings:
+        ticker = f.get("ticker")
+        if ticker not in portfolio_tickers:
+            continue
+
         cat = str(f.get("category") or "").strip()
         if cat.lower() not in alert_categories_lower:
             continue
@@ -176,7 +207,7 @@ def build_material_filing_alerts(settings: dict[str, Any]) -> list[dict[str, Any
         headline = (f.get("summary") or f.get("subject") or "Material announcement").strip()
 
         alerts.append({
-            "ticker": f["ticker"],
+            "ticker": ticker,
             "kind": "material_filing",
             "message": headline,
             "value": None,
@@ -186,7 +217,10 @@ def build_material_filing_alerts(settings: dict[str, Any]) -> list[dict[str, Any
             "seen": False,
         })
 
-    logger.info("Found %d priority 1 material filings in last 48h matching alert categories.", len(alerts))
+    logger.info(
+        "Found %d priority 1 material filings in last 48h for portfolio companies matching alert categories.",
+        len(alerts),
+    )
     return alerts
 
 
@@ -274,14 +308,21 @@ def generate_alerts() -> None:
     """Main workflow to generate price, volume, and material filing alerts."""
     logger.info("Starting alerts generation pipeline...")
     settings = load_settings()
+    portfolio_tickers = get_portfolio_tickers()
+    logger.info("Identified %d portfolio companies (in_portfolio = true).", len(portfolio_tickers))
 
-    # 1. Price and volume alerts
-    latest_prices = get_latest_prices()
+    # Clean up any non-portfolio alerts
+    deleted_count = delete_non_portfolio_alerts(portfolio_tickers)
+    if deleted_count > 0:
+        logger.info("Removed %d legacy alerts for non-portfolio companies.", deleted_count)
+
+    # 1. Price and volume alerts (portfolio only)
+    latest_prices = get_latest_prices(portfolio_tickers)
     pv_alerts = build_price_and_volume_alerts(latest_prices, settings)
     logger.info("Generated %d price & volume candidate alerts.", len(pv_alerts))
 
-    # 2. Material filing alerts
-    filing_alerts = build_material_filing_alerts(settings)
+    # 2. Material filing alerts (portfolio only)
+    filing_alerts = build_material_filing_alerts(settings, portfolio_tickers)
     logger.info("Generated %d material filing candidate alerts.", len(filing_alerts))
 
     all_candidates = pv_alerts + filing_alerts
