@@ -2,16 +2,22 @@
 
 Pre-filters routine paperwork using rule-based subjects, then classifies
 material announcements with Google Gemini (task "bulk") in batches of 20.
+When the announcement text is thin ("Filing lacks detail — open the PDF"),
+downloads the attachment PDF, extracts the first 3 pages of text, and
+reclassifies the filing using the PDF text (first 4,000 chars).
 Saves category, priority, summary (headline), and enrichment into the filings table.
 """
 
 from typing import Any
 from pathlib import Path
 import sys
+import io
 import json
 import logging
 import argparse
 import datetime
+import requests
+import pypdf
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +32,11 @@ from pipeline.llm import call_json, get_cache_stats, reset_cache_stats
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("classify")
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v2"
+
+# Local PDF text cache
+PDF_CACHE_DIR = PIPELINE_DIR / "cache" / "pdf_text"
+PDF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_CATEGORIES = {
     "results",
@@ -111,7 +121,6 @@ def fetch_filings(all_filings: bool, ticker: str | None) -> list[dict[str, Any]]
     if ticker:
         query = query.eq("ticker", ticker.upper())
 
-    # Range-paginate up to 5,000 filings
     all_data = []
     page_size = 1000
     start = 0
@@ -243,12 +252,104 @@ def classify_batch(
     return final_results
 
 
+def extract_pdf_text(filing_id: str, attachment_url: str) -> str | None:
+    """Download attachment PDF, extract first 3 pages of text, and cache locally."""
+    if not attachment_url:
+        return None
+
+    cache_file = PDF_CACHE_DIR / f"{filing_id}.txt"
+    if cache_file.exists():
+        try:
+            return cache_file.read_text(encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Error reading cached PDF text for %s: %s", filing_id, exc)
+
+    try:
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:118.0) "
+                "Gecko/20100101 Firefox/118.0"
+            ),
+            "Accept": "application/pdf,*/*",
+        }
+        resp = requests.get(attachment_url, headers=headers, timeout=20)
+        if resp.status_code == 200 and resp.content:
+            reader = pypdf.PdfReader(io.BytesIO(resp.content))
+            pages_text = []
+            for page in reader.pages[:3]:
+                t = page.extract_text()
+                if t:
+                    pages_text.append(t)
+            full_text = "\n".join(pages_text).strip()
+            if full_text:
+                cache_file.write_text(full_text, encoding="utf-8")
+                return full_text
+    except Exception as exc:
+        logger.warning("Could not read PDF for filing %s: %s", filing_id, exc)
+
+    return None
+
+
+def reclassify_thin_text_filings(
+    updates: list[dict[str, Any]],
+    company_names: dict[str, str],
+    prompt_template: str,
+) -> int:
+    """Download PDF and reclassify priority 1 & 2 filings whose headline is thin."""
+    reclassified_count = 0
+
+    for item in updates:
+        priority = item.get("priority")
+        headline = (item.get("summary") or "").strip().lower()
+
+        if priority in (1, 2) and "filing lacks detail" in headline:
+            att_url = item.get("attachment_url")
+            if not att_url:
+                continue
+
+            pdf_text = extract_pdf_text(item["id"], att_url)
+            if not pdf_text:
+                continue
+
+            payload = {
+                "id": item["id"],
+                "ticker": item["ticker"],
+                "company": company_names.get(item["ticker"], item["ticker"]),
+                "subject": item.get("subject", ""),
+                "text": pdf_text[:4000],
+            }
+            single_json = json.dumps([payload], indent=2)
+            prompt = prompt_template.replace("{filings_json}", single_json)
+
+            try:
+                resp = call_json("bulk", prompt, PROMPT_VERSION)
+                if isinstance(resp, list) and len(resp) > 0:
+                    valid = validate_item(resp[0], item["id"])
+                    if valid:
+                        logger.info(
+                            "Reclassified %s (%s) from PDF text -> priority %d: %s",
+                            item["ticker"],
+                            item["id"],
+                            valid["priority"],
+                            valid["headline"],
+                        )
+                        item["category"] = valid["category"]
+                        item["priority"] = valid["priority"]
+                        item["summary"] = valid["headline"]
+                        item["enrichment"] = {"why": valid["why"], "source": "pdf_attachment"}
+                        reclassified_count += 1
+            except Exception as exc:
+                logger.warning("Failed to reclassify filing %s with PDF text: %s", item["id"], exc)
+
+    return reclassified_count
+
+
 def run_classification(
     all_filings: bool = False,
     ticker: str | None = None,
     batch_size: int = 20,
 ) -> dict[str, Any]:
-    """Execute rule pre-filtering and LLM classification on filings."""
+    """Execute rule pre-filtering, LLM classification, and PDF extraction on filings."""
     reset_cache_stats()
 
     filings = fetch_filings(all_filings, ticker)
@@ -258,12 +359,13 @@ def run_classification(
             "total_processed": 0,
             "rule_count": 0,
             "llm_count": 0,
+            "pdf_read_count": 0,
             "llm_calls": 0,
             "cache_hits": 0,
             "priority_counts": {1: 0, 2: 0, 3: 0},
         }
 
-    logger.info("Loaded %d filings for classification.", len(filings))
+    logger.info("Loaded %d filings for classification (PROMPT_VERSION=%s).", len(filings), PROMPT_VERSION)
 
     routine_subjects = load_routine_subjects()
     company_names = get_company_names()
@@ -315,7 +417,11 @@ def run_classification(
             updated_row["processed_at"] = now_iso
             llm_updates.append(updated_row)
 
-    # Step 3: Save all updates to Supabase
+    # Step 3: Reclassify thin-text filings via PDF extraction
+    pdf_read_count = reclassify_thin_text_filings(llm_updates, company_names, prompt_template)
+    logger.info("PDF extraction: reclassified %d thin-text filings.", pdf_read_count)
+
+    # Step 4: Save all updates to Supabase
     all_to_save = rule_updates + llm_updates
     save_batch_size = 100
     for i in range(0, len(all_to_save), save_batch_size):
@@ -334,15 +440,18 @@ def run_classification(
         "total_processed": len(all_to_save),
         "rule_count": len(rule_updates),
         "llm_count": len(llm_updates),
+        "pdf_read_count": pdf_read_count,
         "llm_calls": stats.get("real_calls", 0),
         "cache_hits": stats.get("cache_hits", 0),
         "priority_counts": priority_counts,
     }
 
     print("\n================ Filing Classifier Summary ================")
+    print(f"Prompt version    : {PROMPT_VERSION}")
     print(f"Filings processed : {summary['total_processed']}")
     print(f"  - By rule       : {summary['rule_count']}")
     print(f"  - By LLM        : {summary['llm_count']}")
+    print(f"  - PDF read/fixed: {summary['pdf_read_count']}")
     print(f"LLM calls made    : {summary['llm_calls']}")
     print(f"Cache hits        : {summary['cache_hits']}")
     print("\nPriority distribution:")
