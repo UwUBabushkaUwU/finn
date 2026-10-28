@@ -1,0 +1,25 @@
+# Environment variables & scratch
+.env
+.env.local
+.env.*.local
+notes
+
+# Dependencies
+node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Build outputs
+.next/
+out/
+dist/
+build/
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

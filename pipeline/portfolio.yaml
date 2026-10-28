@@ -1,0 +1,164 @@
+# FINN — portfolio, research set and alert defaults
+# Place at: pipeline/portfolio.yaml
+#
+# Tickers are NSE symbols. The pipeline adds ".NS" only when calling yfinance.
+# Picked on 28 Oct 2026, mid Q2 FY27 results season, so the demo window has:
+#   - results already filed (results cards have real numbers)
+#   - results due during the build (the brief fills up live)
+#   - recent CFO / deputy MD changes (management-change cards)
+
+portfolio:
+  # ---- Large caps -------------------------------------------------------
+  - ticker: HDFCBANK
+    name: HDFC Bank
+    sector: Banking
+    size: large
+    why: Bellwether bank; Q2 FY27 results already filed
+
+  - ticker: INFY
+    name: Infosys
+    sector: IT services
+    size: large
+    why: Results 23 Oct; IT gives a clean QoQ/YoY results card
+
+  - ticker: LT
+    name: Larsen & Toubro
+    sector: Capital goods
+    size: large
+    why: Results 27 Oct and a ~6% next-day jump; tests the price-move alert
+
+  - ticker: MARUTI
+    name: Maruti Suzuki India
+    sector: Automobiles
+    size: large
+    why: Results 27 Oct; cost-pressure margin story
+
+  - ticker: CIPLA
+    name: Cipla
+    sector: Pharma
+    size: large
+    why: Results 27 Oct with a sharp profit fall; tests a negative results card
+
+  - ticker: HINDUNILVR
+    name: Hindustan Unilever
+    sector: FMCG
+    size: large
+    why: Results 28 Oct; filing lands while you build
+
+  # ---- Mid caps ---------------------------------------------------------
+  - ticker: BRITANNIA
+    name: Britannia Industries
+    sector: FMCG
+    size: mid
+    why: New deputy MD and new CFO effective 1 Oct; management-change card
+
+  - ticker: ABB
+    name: ABB India
+    sector: Capital goods
+    size: mid
+    why: CFO appointed 6 Oct (effective Jan 2027); results due 13 Nov
+
+  - ticker: TATACONSUM
+    name: Tata Consumer Products
+    sector: FMCG
+    size: mid
+    why: Results 26 Oct
+
+  - ticker: PIDILITIND
+    name: Pidilite Industries
+    sector: Chemicals
+    size: mid
+    why: Results 28 Oct; filing lands while you build
+
+  - ticker: TVSMOTOR
+    name: TVS Motor Company
+    sector: Automobiles
+    size: mid
+    why: Results 28 Oct
+
+  - ticker: WAAREEENER
+    name: Waaree Energies
+    sector: Renewable energy
+    size: mid
+    why: Results 27 Oct; volatile, good for volume alerts
+
+  - ticker: MAZDOCK
+    name: Mazagon Dock Shipbuilders
+    sector: Defence
+    size: mid
+    why: Results 27 Oct; PSU with frequent order-win press releases
+
+  - ticker: MAXHEALTH
+    name: Max Healthcare Institute
+    sector: Healthcare
+    size: mid
+    why: Results due 30 Oct; lands during the build
+
+  - ticker: SUZLON
+    name: Suzlon Energy
+    sector: Renewable energy
+    size: mid
+    why: Results due 29 Oct; very high retail volume, stress-tests volume alerts
+
+  # ---- Small caps -------------------------------------------------------
+  - ticker: HOMEFIRST
+    name: Home First Finance
+    sector: Housing finance
+    size: small
+    why: Results AND a new CFO in the same filing on 27 Oct; best single demo
+
+  - ticker: NAZARA
+    name: Nazara Technologies
+    sector: Gaming
+    size: small
+    why: CFO change 12 Oct plus a preferential equity raise; fund_raise + management_change
+
+  - ticker: NETWEB
+    name: Netweb Technologies India
+    sector: IT hardware
+    size: small
+    why: Results 24 Oct with very large YoY growth; tests extreme numbers on the card
+
+# Pull side: on-demand research demo set. Chosen because management gives
+# explicit numeric targets on earnings calls, which is what
+# "promised vs. delivered" needs. Outside the portfolio on purpose.
+research:
+  - ticker: PERSISTENT
+    name: Persistent Systems
+    sector: IT services
+    why: Long-standing explicit revenue and margin targets
+
+  - ticker: BAJFINANCE
+    name: Bajaj Finance
+    sector: NBFC
+    why: Quarterly guidance on AUM growth and credit cost
+
+  - ticker: DIXON
+    name: Dixon Technologies
+    sector: Electronics manufacturing
+    why: Volume and revenue guidance by segment; fast-changing story
+
+  - ticker: KAYNES
+    name: Kaynes Technology India
+    sector: Electronics manufacturing
+    why: Aggressive growth targets; a real test of narrative vs. numbers
+
+# Defaults for the settings table. The settings screen edits these later.
+alerts:
+  volume_multiple: 2.0        # volume >= 2x its 20-day average
+  volume_lookback_days: 20
+  price_move_pct: 5.0         # close-to-close move beyond +/-5%
+  digest_window_hours: 24
+  alert_categories:           # filing categories that trigger an alert
+    - results
+    - M&A
+    - management_change
+    - fund_raise
+    - litigation
+    - credit_rating
+    - pledging
+
+# Model routing. Check the current model ids in AI Studio before phase 2.
+models:
+  bulk: gemini-flash-lite-latest   # classify, summarise, extract
+  reasoning: gemini-flash-latest   # results cross-check, research
