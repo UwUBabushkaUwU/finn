@@ -288,27 +288,31 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
         else None
     )
 
-    # Sanity check: PBT − total tax (+ associates if printed after tax) ≈ total PAT within 2%
+    # Sanity check reconciliation: PBT − total tax (+ associates if printed after tax) ≈ total PAT within 2%
     pbt_curr = pbt["current"]
     tax_curr = tax["current"]
     total_pat_curr = pat_total["current"]
     assoc_curr = share_associates["current"] or 0.0
 
-    check = True
+    verified = True
     check_diff = 0.0
     if pbt_curr is not None and total_pat_curr is not None:
-        assoc_adj = assoc_curr if associates_after_tax else 0.0
+        candidates = []
         if tax_curr is not None:
-            # In Indian financial statements, tax is often printed in parentheses (e.g. (1,018)),
-            # which clean_num converts to negative. As an expense, it is subtracted: PBT - |tax|.
-            # In case of a genuine net tax credit (e.g. Nazara), it adds to profit: PBT - tax.
-            diff_expense = abs((pbt_curr - abs(tax_curr) + assoc_adj) - total_pat_curr)
-            diff_credit = abs((pbt_curr - tax_curr + assoc_adj) - total_pat_curr)
-            check_diff = min(diff_expense, diff_credit)
+            # Handle both standard tax expense: PBT - |tax|, and tax credit: PBT - tax,
+            # with associates either after tax (+ assoc) or before tax / already inside PBT
+            for t_val in (abs(tax_curr), tax_curr):
+                candidates.append(abs((pbt_curr - t_val) - total_pat_curr))
+                if assoc_curr:
+                    candidates.append(abs((pbt_curr - t_val + assoc_curr) - total_pat_curr))
         else:
-            check_diff = abs((pbt_curr + assoc_adj) - total_pat_curr)
+            candidates.append(abs(pbt_curr - total_pat_curr))
+            if assoc_curr:
+                candidates.append(abs((pbt_curr + assoc_curr) - total_pat_curr))
+
+        check_diff = min(candidates)
         tolerance = 0.02 * max(abs(total_pat_curr), 1.0)
-        check = check_diff <= tolerance
+        verified = check_diff <= tolerance
 
     headline = build_headline(rev_yoy, pat_yoy)
 
@@ -380,7 +384,7 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
             },
             "associates_after_tax": associates_after_tax,
             "is_lender": is_lender,
-            "check": check,
+            "verified": verified,
             "check_diff": round(check_diff, 2),
             "page": raw_data.get("page"),
             "source_pdf_url": source_pdf_url,
@@ -559,7 +563,7 @@ def print_summary_table(records: list[dict[str, Any]]) -> None:
 
     headers = (
         f"{'Ticker':<10} {'Basis':<12} {'Rev (₹cr)':<10} {'EBITDA':<10} {'PBT':<10} "
-        f"{'PAT (₹cr)':<10} {'Rev YoY':<10} {'PAT YoY':<12} {'Check':<7} {'Headline'}"
+        f"{'PAT (₹cr)':<10} {'Rev YoY':<10} {'PAT YoY':<12} {'Verified':<10} {'Headline'}"
     )
     print(headers)
     print("-" * 115)
@@ -587,12 +591,12 @@ def print_summary_table(records: list[dict[str, Any]]) -> None:
         pat_lbl = m.get("pat", {}).get("yoy_label")
         pat_yoy_str = f"{pat_yoy:+.1f}%" if pat_yoy is not None else (pat_lbl or "-")
 
-        check = "OK" if r.get("check") else "FAIL"
+        ver_str = "true" if r.get("verified") else "false"
         headline = r.get("headline", "")
 
         print(
             f"{ticker:<10} {basis:<12} {rev_str:<10} {ebitda_str:<10} {pbt_str:<10} "
-            f"{pat_str:<10} {rev_yoy_str:<10} {pat_yoy_str:<12} {check:<7} {headline}"
+            f"{pat_str:<10} {rev_yoy_str:<10} {pat_yoy_str:<12} {ver_str:<10} {headline}"
         )
 
     print("-" * 115)
@@ -616,9 +620,8 @@ def print_summary_table(records: list[dict[str, Any]]) -> None:
             tax_val = im.get("tax_expense", {}).get("current") if "tax_expense" in im else None
             tot_pat = im.get("pat_total", {}).get("current")
             assoc = im.get("share_of_associates_jv", {}).get("current")
-            check_st = "OK" if item.get("check") else "FAIL"
             diff_st = item.get("check_diff", 0)
-            print(f"  • {t:<10} Check: {check_st} (diff: ₹{diff_st} cr, PBT={pbt_val}, Total PAT={tot_pat}, Assoc={assoc})")
+            print(f"  • {t:<10} verified: {item.get('verified')} (diff: ₹{diff_st} cr, PBT={pbt_val}, Total PAT={tot_pat}, Assoc={assoc})")
 
     # 3. Nazara's revenue for all three columns with period labels exactly as printed
     if "NAZARA" in by_ticker:

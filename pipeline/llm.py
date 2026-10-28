@@ -34,6 +34,7 @@ _stats = {
     "retries": 0,
 }
 
+_fallback_active: dict[str, bool] = {}
 _client: genai.Client | None = None
 
 
@@ -43,7 +44,7 @@ def get_gemini_client() -> genai.Client:
     if _client is None:
         if not GEMINI_API_KEY:
             raise ValueError("GEMINI_API_KEY is not set in environment variables.")
-        _client = genai.Client(api_key=GEMINI_API_KEY)
+        _client = genai.Client(api_key=GEMINI_API_KEY, http_options=types.HttpOptions(timeout=20.0))
     return _client
 
 
@@ -85,7 +86,10 @@ def save_cache(cache_key: str, task: str, model: str, output: Any) -> None:
 
 
 def _execute_gemini_call(
-    model: str, prompt: str, pdf_bytes: bytes | None = None
+    model: str,
+    prompt: str,
+    pdf_bytes: bytes | None = None,
+    fast_fail_503: bool = False,
 ) -> dict[str, Any] | list[Any]:
     """Execute Gemini generate_content with JSON mode and rate-limit backoff."""
     client = get_gemini_client()
@@ -110,16 +114,23 @@ def _execute_gemini_call(
             text = (response.text or "").strip()
             return json.loads(text)
         except Exception as exc:
-            # Check for rate-limiting, temporary spikes, or server issues
             err_msg = str(exc).lower()
+            is_503 = (
+                "503" in err_msg
+                or "unavailable" in err_msg
+                or "high demand" in err_msg
+            )
+            if fast_fail_503 and is_503:
+                logger.warning("503 UNAVAILABLE on %s: %s (fast-failing to fallback)", model, exc)
+                raise exc
+
+            # Check for rate-limiting, temporary spikes, or server issues
             is_rate_limit = (
                 "429" in err_msg
                 or "resource_exhausted" in err_msg
                 or "quota" in err_msg
                 or "rate" in err_msg
-                or "503" in err_msg
-                or "unavailable" in err_msg
-                or "high demand" in err_msg
+                or is_503
                 or "temporar" in err_msg
             )
             if is_rate_limit and attempt <= len(backoff_delays):
@@ -165,17 +176,42 @@ def call_json(
         _stats["cache_hits"] += 1
         return cached_output
 
+    bulk_model = MODEL_IDS.get("bulk")
+    if task == "reasoning" and _fallback_active.get("reasoning") and bulk_model and bulk_model != model:
+        logger.warning(
+            "Reasoning model %s is currently experiencing high demand (503). Using bulk fallback %s...",
+            model,
+            bulk_model,
+        )
+        fallback_key = compute_cache_key(bulk_model, prompt_version, prompt, pdf_bytes=pdf_bytes)
+        fallback_cached = check_cache(fallback_key)
+        if fallback_cached is not None:
+            logger.warning("Fallback used: loaded cached response from bulk model %s", bulk_model)
+            save_cache(cache_key, task, bulk_model, fallback_cached)
+            _stats["cache_hits"] += 1
+            return fallback_cached
+        output = _execute_gemini_call(bulk_model, prompt, pdf_bytes=pdf_bytes)
+        logger.warning("Fallback used: executed live Gemini call with bulk model %s", bulk_model)
+        save_cache(fallback_key, task, bulk_model, output)
+        save_cache(cache_key, task, bulk_model, output)
+        return output
+
     # Cache miss: call model
     _stats["real_calls"] += 1
     try:
-        output = _execute_gemini_call(model, prompt, pdf_bytes=pdf_bytes)
+        output = _execute_gemini_call(
+            model,
+            prompt,
+            pdf_bytes=pdf_bytes,
+            fast_fail_503=(task == "reasoning" and bulk_model is not None and bulk_model != model),
+        )
         save_cache(cache_key, task, model, output)
         return output
     except Exception as exc:
-        bulk_model = MODEL_IDS.get("bulk")
         if task == "reasoning" and bulk_model and bulk_model != model:
+            _fallback_active["reasoning"] = True
             logger.warning(
-                "Primary model %s failed (%s). Falling back to bulk model %s...",
+                "Reasoning model %s failed with error: %s. Falling back to bulk model %s.",
                 model,
                 exc,
                 bulk_model,
@@ -183,10 +219,16 @@ def call_json(
             fallback_key = compute_cache_key(bulk_model, prompt_version, prompt, pdf_bytes=pdf_bytes)
             fallback_cached = check_cache(fallback_key)
             if fallback_cached is not None:
+                logger.warning(
+                    "Fallback used: loaded cached response from bulk model %s for reasoning task",
+                    bulk_model,
+                )
+                save_cache(cache_key, task, bulk_model, fallback_cached)
                 _stats["cache_hits"] += 1
                 return fallback_cached
 
             output = _execute_gemini_call(bulk_model, prompt, pdf_bytes=pdf_bytes)
+            logger.warning("Fallback used: executed live Gemini call with bulk model %s", bulk_model)
             save_cache(cache_key, task, bulk_model, output)
             save_cache(fallback_key, task, bulk_model, output)
             return output

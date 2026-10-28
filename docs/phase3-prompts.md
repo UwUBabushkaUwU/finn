@@ -53,8 +53,8 @@ At the end, results cards show real numbers and management cards say who the per
 > - Convert everything to **₹ crore** from the printed unit (lakh ÷ 100, million ÷ 10, thousand ÷ 10,000, rupees ÷ 1,00,00,000). Fail loudly on a unit you don't recognise.
 > - **EBITDA** = profit_before_tax − exceptional_items + finance_costs + depreciation − other_income. For lenders, EBITDA is null.
 > - QoQ % and YoY % for Revenue, EBITDA, PBT, PAT; EBITDA margin and its change in percentage points.
-> - **Sanity check:** PBT − tax should equal PAT within 2%. If not, set `"check": true`.
-> - Save to the results filing's `enrichment.results` (keep the existing `why`): basis, unit "₹ cr", periods, the four metrics with current / QoQ / YoY, margin, is_lender, check, page, source PDF url.
+> - **Sanity check:** PBT − tax should equal PAT within 2%. If so, set `"verified": true`, else `false`.
+> - Save to the results filing's `enrichment.results` (keep the existing `why`): basis, unit "₹ cr", periods, the four metrics with current / QoQ / YoY, margin, is_lender, verified, page, source PDF url.
 > - Replace the event's headline (`summary` of the main results filing) with one built in Python from the numbers, e.g. "Revenue +12% YoY, PAT −35% YoY". Lenders: "Revenue +18% YoY, PAT +27% YoY".
 >
 > **5. Test against known figures.** Reported Q2 FY27 numbers (consolidated unless noted; small differences can be standalone vs consolidated):
@@ -126,7 +126,7 @@ At the end, results cards show real numbers and management cards say who the per
 > - A compact 4-row table: Revenue, EBITDA, PBT, PAT. Columns: this quarter (₹ cr), QoQ %, YoY %.
 > - Monospace, right-aligned numbers. Green or red **only** on the % changes.
 > - One line under it: "EBITDA margin 18.2% · +0.6 pt YoY".
-> - A small footer: "Consolidated · from results PDF p.3" linking to the PDF. If `check` is true, add "· figures need a check".
+> - A small footer: "Consolidated · from results PDF p.3" linking to the PDF. If `verified` is false, add "· figures need a check".
 > - Lenders: show "—" for EBITDA and margin, with the footer note "EBITDA not meaningful for lenders".
 >
 > **2. People block**, inside any card with `enrichment.people`: each top-role person as name (bold), role, change and effective date, then their bio in smaller text with its source ("from the filing" or the site's domain as a link).
