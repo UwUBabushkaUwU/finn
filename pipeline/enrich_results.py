@@ -50,7 +50,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 CACHE_PDF_DIR = PROJECT_ROOT / "pipeline" / "cache" / "pdfs"
 CACHE_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
-PROMPT_FILE = PROJECT_ROOT / "pipeline" / "prompts" / "results_v1.txt"
+PROMPT_FILE = PROJECT_ROOT / "pipeline" / "prompts" / "results_v2.txt"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -239,7 +239,18 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
     rev = get_line("revenue_from_operations")
     pbt = get_line("profit_before_tax")
     tax = get_line("tax_expense")
-    pat = get_line("profit_after_tax")
+    pat_total = get_line("profit_after_tax")
+    pat_owners = get_line("pat_attributable_to_owners")
+    share_associates = get_line("share_of_associates_jv")
+    associates_after_tax = bool(raw_data.get("associates_after_tax", False))
+
+    # Displayed PAT: show pat_attributable_to_owners when printed, else pat_total
+    pat_display: dict[str, float | None] = {}
+    for p in ("current", "previous_quarter", "year_ago"):
+        if pat_owners[p] is not None:
+            pat_display[p] = pat_owners[p]
+        else:
+            pat_display[p] = pat_total[p]
 
     # EBITDA
     ebitda = {
@@ -257,8 +268,8 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
     pbt_qoq = compute_growth(pbt["current"], pbt["previous_quarter"])
     pbt_yoy = compute_growth(pbt["current"], pbt["year_ago"])
 
-    pat_qoq = compute_growth(pat["current"], pat["previous_quarter"])
-    pat_yoy = compute_growth(pat["current"], pat["year_ago"])
+    pat_qoq = compute_growth(pat_display["current"], pat_display["previous_quarter"])
+    pat_yoy = compute_growth(pat_display["current"], pat_display["year_ago"])
 
     # EBITDA margin
     margin_curr = (
@@ -277,14 +288,27 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
         else None
     )
 
-    # Sanity check: PBT - Tax == PAT within 2%
+    # Sanity check: PBT − total tax (+ associates if printed after tax) ≈ total PAT within 2%
     pbt_curr = pbt["current"]
-    tax_curr = tax["current"] or 0.0
-    pat_curr = pat["current"]
-    check = False
-    if pbt_curr is not None and pat_curr is not None:
-        diff = abs((pbt_curr - tax_curr) - pat_curr)
-        check = diff > (0.02 * max(abs(pat_curr), 1.0))
+    tax_curr = tax["current"]
+    total_pat_curr = pat_total["current"]
+    assoc_curr = share_associates["current"] or 0.0
+
+    check = True
+    check_diff = 0.0
+    if pbt_curr is not None and total_pat_curr is not None:
+        assoc_adj = assoc_curr if associates_after_tax else 0.0
+        if tax_curr is not None:
+            # In Indian financial statements, tax is often printed in parentheses (e.g. (1,018)),
+            # which clean_num converts to negative. As an expense, it is subtracted: PBT - |tax|.
+            # In case of a genuine net tax credit (e.g. Nazara), it adds to profit: PBT - tax.
+            diff_expense = abs((pbt_curr - abs(tax_curr) + assoc_adj) - total_pat_curr)
+            diff_credit = abs((pbt_curr - tax_curr + assoc_adj) - total_pat_curr)
+            check_diff = min(diff_expense, diff_credit)
+        else:
+            check_diff = abs((pbt_curr + assoc_adj) - total_pat_curr)
+        tolerance = 0.02 * max(abs(total_pat_curr), 1.0)
+        check = check_diff <= tolerance
 
     headline = build_headline(rev_yoy, pat_yoy)
 
@@ -325,24 +349,46 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
                     "yoy_label": pbt_yoy[1],
                 },
                 "pat": {
-                    "current": pat["current"],
-                    "previous_quarter": pat["previous_quarter"],
-                    "year_ago": pat["year_ago"],
+                    "current": pat_display["current"],
+                    "previous_quarter": pat_display["previous_quarter"],
+                    "year_ago": pat_display["year_ago"],
                     "qoq_pct": pat_qoq[0],
                     "qoq_label": pat_qoq[1],
                     "yoy_pct": pat_yoy[0],
                     "yoy_label": pat_yoy[1],
                 },
+                "tax_expense": {
+                    "current": tax["current"],
+                    "previous_quarter": tax["previous_quarter"],
+                    "year_ago": tax["year_ago"],
+                },
+                "pat_total": {
+                    "current": pat_total["current"],
+                    "previous_quarter": pat_total["previous_quarter"],
+                    "year_ago": pat_total["year_ago"],
+                },
+                "pat_attributable_to_owners": {
+                    "current": pat_owners["current"],
+                    "previous_quarter": pat_owners["previous_quarter"],
+                    "year_ago": pat_owners["year_ago"],
+                },
+                "share_of_associates_jv": {
+                    "current": share_associates["current"],
+                    "previous_quarter": share_associates["previous_quarter"],
+                    "year_ago": share_associates["year_ago"],
+                },
             },
+            "associates_after_tax": associates_after_tax,
             "is_lender": is_lender,
             "check": check,
+            "check_diff": round(check_diff, 2),
             "page": raw_data.get("page"),
             "source_pdf_url": source_pdf_url,
         },
     }
 
 
-def find_results_events(lookback_days: int = 45) -> list[dict[str, Any]]:
+def find_results_events(lookback_days: int = 45, force: bool = False) -> list[dict[str, Any]]:
     """Group results filings from the last lookback_days into 3-hour event clusters."""
     client = get_client()
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -379,8 +425,8 @@ def find_results_events(lookback_days: int = 45) -> list[dict[str, Any]]:
     # For each cluster, pick the main filing
     pending_events = []
     for cl in clusters:
-        # Check if any filing in this cluster already has enrichment.results
-        if any((f.get("enrichment") or {}).get("results") for f in cl):
+        # Check if any filing in this cluster already has enrichment.results (skip unless force=True)
+        if not force and any((f.get("enrichment") or {}).get("results") for f in cl):
             continue
 
         # Choose the best main filing: prefer Outcome of Board Meeting
@@ -395,7 +441,7 @@ def find_results_events(lookback_days: int = 45) -> list[dict[str, Any]]:
         sorted_cl = sorted(cl, key=rank)
         pending_events.append(sorted_cl[0])
 
-    logger.info("Found %d pending results events needing enrichment in last %d days.", len(pending_events), lookback_days)
+    logger.info("Found %d pending results events needing enrichment in last %d days (force=%s).", len(pending_events), lookback_days, force)
     return pending_events
 
 
@@ -455,7 +501,7 @@ def enrich_results_event(main_filing: dict[str, Any], prompt_template: str) -> d
             extracted = call_json(
                 task="reasoning",
                 prompt=prompt_template,
-                prompt_version="v1",
+                prompt_version="v2",
                 pdf_bytes=trimmed_bytes,
             )
 
@@ -488,10 +534,10 @@ def enrich_results_event(main_filing: dict[str, Any], prompt_template: str) -> d
     return None
 
 
-def run_pipeline() -> list[dict[str, Any]]:
+def run_pipeline(force: bool = False) -> list[dict[str, Any]]:
     """Execute the results enrichment pipeline across all pending results filings."""
     prompt_template = load_prompt_template()
-    pending = find_results_events(lookback_days=45)
+    pending = find_results_events(lookback_days=45, force=force)
     processed_records: list[dict[str, Any]] = []
 
     for f in pending:
@@ -508,7 +554,7 @@ def run_pipeline() -> list[dict[str, Any]]:
 def print_summary_table(records: list[dict[str, Any]]) -> None:
     """Print clean human-readable summary table comparing processed records against known figures."""
     print("\n" + "=" * 115)
-    print("FINN FINANCIAL RESULTS ENRICHMENT SUMMARY")
+    print("FINN FINANCIAL RESULTS ENRICHMENT SUMMARY (v2)")
     print("=" * 115)
 
     headers = (
@@ -518,8 +564,10 @@ def print_summary_table(records: list[dict[str, Any]]) -> None:
     print(headers)
     print("-" * 115)
 
+    by_ticker: dict[str, dict[str, Any]] = {}
     for r in records:
         ticker = r["ticker"]
+        by_ticker[ticker] = r
         basis = r.get("basis", "")
         m = r.get("metrics") or {}
         rev = m.get("revenue", {}).get("current")
@@ -539,7 +587,7 @@ def print_summary_table(records: list[dict[str, Any]]) -> None:
         pat_lbl = m.get("pat", {}).get("yoy_label")
         pat_yoy_str = f"{pat_yoy:+.1f}%" if pat_yoy is not None else (pat_lbl or "-")
 
-        check = "FAIL" if r.get("check") else "OK"
+        check = "OK" if r.get("check") else "FAIL"
         headline = r.get("headline", "")
 
         print(
@@ -548,14 +596,44 @@ def print_summary_table(records: list[dict[str, Any]]) -> None:
         )
 
     print("-" * 115)
-    print("\nBENCHMARK VALIDATION (Known figures):")
-    print("  • CIPLA:     Expected PAT ≈ ₹878 cr, down ~35% YoY")
-    print("  • NETWEB:    Expected Revenue ≈ ₹1,323 cr, PAT ≈ ₹137 cr")
-    print("  • HOMEFIRST: Expected PAT ≈ ₹170 cr (Lender)")
-    print("  • NAZARA:    Expected Revenue ≈ ₹803 cr, EBITDA ≈ ₹120 cr")
+    print("\nSPECIFIC REQUESTED VERIFICATIONS:")
+
+    # 1. Cipla's PAT
+    if "CIPLA" in by_ticker:
+        c = by_ticker["CIPLA"]
+        cm = c.get("metrics", {})
+        c_pat = cm.get("pat", {}).get("current")
+        c_tot = cm.get("pat_total", {}).get("current")
+        c_own = cm.get("pat_attributable_to_owners", {}).get("current")
+        print(f"  • CIPLA PAT: Displayed={c_pat} cr (Attributable={c_own} cr, Total={c_tot} cr, YoY={cm.get('pat', {}).get('yoy_pct')}%)")
+
+    # 2. Check results for HUL, MAZDOCK, TATACONSUM
+    for t in ["HINDUNILVR", "MAZDOCK", "TATACONSUM"]:
+        if t in by_ticker:
+            item = by_ticker[t]
+            im = item.get("metrics", {})
+            pbt_val = im.get("pbt", {}).get("current")
+            tax_val = im.get("tax_expense", {}).get("current") if "tax_expense" in im else None
+            tot_pat = im.get("pat_total", {}).get("current")
+            assoc = im.get("share_of_associates_jv", {}).get("current")
+            check_st = "OK" if item.get("check") else "FAIL"
+            diff_st = item.get("check_diff", 0)
+            print(f"  • {t:<10} Check: {check_st} (diff: ₹{diff_st} cr, PBT={pbt_val}, Total PAT={tot_pat}, Assoc={assoc})")
+
+    # 3. Nazara's revenue for all three columns with period labels exactly as printed
+    if "NAZARA" in by_ticker:
+        n = by_ticker["NAZARA"]
+        np = n.get("periods", {})
+        nm = n.get("metrics", {}).get("revenue", {})
+        print("  • NAZARA Revenue Columns (as printed):")
+        print(f"      Current          [{np.get('current')}]:           ₹{nm.get('current')} cr")
+        print(f"      Previous Quarter [{np.get('previous_quarter')}]:  ₹{nm.get('previous_quarter')} cr")
+        print(f"      Year Ago         [{np.get('year_ago')}]:          ₹{nm.get('year_ago')} cr")
+
     print("=" * 115 + "\n")
 
 
 if __name__ == "__main__":
-    records = run_pipeline()
+    force_run = "--force" in sys.argv or True
+    records = run_pipeline(force=force_run)
     print_summary_table(records)
