@@ -3,14 +3,28 @@
 Workflow:
 1. Select filings with category 'management_change', priority 1 or 2,
    no enrichment.people yet (unless forced), within the last 45 days.
-2. Download PDF (cached locally), trim to first 6 pages, extract management
-   changes using Gemini bulk model with pipeline/prompts/mgmt_v1.txt.
-3. For newly appointed persons with is_top_role=True and no profile in the filing,
-   search Serper ("<name>" "<company>" linkedin) cached in llm_cache (key=query)
-   and synthesize a 2-sentence bio with Gemini bulk model and pipeline/prompts/bio_v1.txt.
-4. Save the changes list to enrichment.people with bio and bio_source ("filing" or URL).
-5. Rewrite the filing headline (summary) for top-role changes. Non-top-role changes
-   keep their headline; if the filing has no top-role change, lower priority to 2.
+2. Download PDF (cached locally, unpacking ZIP archives if needed), trim to
+   first 6 pages, extract management changes with Gemini bulk model and
+   pipeline/prompts/mgmt_v1.txt.
+3. Merge people with the same name in one filing into one entry
+   (e.g. "N. Venkataraman moves from CFO to Deputy MD").
+4. For newly appointed persons with is_top_role=True and no profile in the filing:
+   - Strict search: "<name>" "<company>" linkedin
+   - If strict returns no match, fallback search: "<name>" <role short form, e.g. CFO> linkedin (no company).
+   - Searches cached in llm_cache (key=query).
+   - Synthesize bio using Gemini bulk model with pipeline/prompts/bio_v2.txt.
+5. Rewrite headline for EVERY filing with people:
+   - At most 2 changes, ordered CEO/MD > CFO > chairman > whole-time director;
+     appointments and resignations before redesignations.
+   - Strip Mr./Ms./Shri.
+   - Add "+N more" if there are other changes.
+6. Priority:
+   - Any top-role appointment or resignation (including CFO-designate) is priority 1.
+   - Redesignations only are priority 2.
+   - Other management changes without top roles are priority 2.
+7. Duplicates:
+   - If a filing's people list matches another filing for the same ticker within 7 days,
+     keep the earliest and set the others to priority 3 with headline "Duplicate of earlier filing".
 """
 
 from typing import Any
@@ -19,6 +33,7 @@ import os
 import sys
 import time
 import io
+import re
 import json
 import logging
 import hashlib
@@ -56,7 +71,7 @@ CACHE_PDF_DIR = PROJECT_ROOT / "pipeline" / "cache" / "pdfs"
 CACHE_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 PROMPT_MGMT_FILE = PROJECT_ROOT / "pipeline" / "prompts" / "mgmt_v1.txt"
-PROMPT_BIO_FILE = PROJECT_ROOT / "pipeline" / "prompts" / "bio_v1.txt"
+PROMPT_BIO_FILE = PROJECT_ROOT / "pipeline" / "prompts" / "bio_v2.txt"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -79,6 +94,115 @@ def load_prompt_templates() -> tuple[str, str]:
     return mgmt_prompt, bio_prompt
 
 
+def clean_person_name(name: str) -> str:
+    """Strip honorifics (Mr., Ms., Mrs., Shri, Smt., Dr.) from a person's name."""
+    if not name:
+        return ""
+    cleaned = re.sub(r"^(Mr\.|Ms\.|Mrs\.|Shri\.?|Smt\.?|Dr\.)\s+", "", name.strip(), flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def normalize_role(role: str) -> str:
+    """Standardize role titles for concise, readable headlines."""
+    if not role:
+        return ""
+    r = role.strip()
+    r_lower = r.lower()
+
+    if "chief financial officer" in r_lower or r_lower == "cfo":
+        if "designate" in r_lower:
+            return "CFO Designate"
+        return "CFO"
+    if (
+        "managing director & chief executive officer" in r_lower
+        or "managing director and chief executive officer" in r_lower
+        or "md & ceo" in r_lower
+        or "md and ceo" in r_lower
+    ):
+        return "MD & CEO"
+    if "chief executive officer" in r_lower or r_lower == "ceo":
+        return "CEO"
+    if "managing director" in r_lower or r_lower == "md":
+        return "MD"
+    if "deputy managing director" in r_lower or "deputy md" in r_lower:
+        return "Deputy MD"
+    if "whole-time director" in r_lower or "whole time director" in r_lower or r_lower == "wtd":
+        return "Whole-time Director"
+    if "statutory auditor" in r_lower:
+        return "Statutory Auditor"
+    if "independent director" in r_lower:
+        return "Independent Director"
+    if "chairman" in r_lower:
+        return "Chairman"
+    if "general counsel" in r_lower or "group head - legal" in r_lower:
+        return "General Counsel"
+    if "chief compliance officer" in r_lower or "compliance officer" in r_lower:
+        return "Chief Compliance Officer"
+
+    return r
+
+
+def get_role_short_form(role: str) -> str:
+    """Extract standard short form for web search (e.g. CFO, CEO, MD, etc.)."""
+    r_lower = role.lower()
+    if "cfo" in r_lower or "financial" in r_lower:
+        return "CFO"
+    if "ceo" in r_lower or "chief executive" in r_lower:
+        return "CEO"
+    if "managing director" in r_lower or "md" in r_lower:
+        return "MD"
+    if "chairman" in r_lower:
+        return "Chairman"
+    if "whole-time director" in r_lower or "whole time director" in r_lower:
+        return "Whole-time Director"
+    if "director" in r_lower:
+        return "Director"
+    if "auditor" in r_lower:
+        return "Auditor"
+    if "counsel" in r_lower or "legal" in r_lower:
+        return "General Counsel"
+    if "compliance" in r_lower or "cco" in r_lower:
+        return "Chief Compliance Officer"
+    if "technology" in r_lower or "cto" in r_lower:
+        return "CTO"
+    if "operations" in r_lower or "coo" in r_lower:
+        return "COO"
+    return normalize_role(role)
+
+
+def is_top_role_person(p: dict[str, Any]) -> bool:
+    """Check if person change is a top-level role (including CFO-designate)."""
+    if p.get("is_top_role"):
+        return True
+    role = (p.get("role") or "").lower()
+    return any(
+        k in role
+        for k in (
+            "cfo",
+            "ceo",
+            "md",
+            "managing director",
+            "chairman",
+            "whole-time director",
+            "whole time director",
+            "statutory auditor",
+        )
+    )
+
+
+def format_effective_date(dt_str: str | None) -> str:
+    """Format YYYY-MM-DD date into ' from DD Mon', e.g. ' from 27 Oct'."""
+    if not dt_str:
+        return ""
+    try:
+        dt = datetime.date.fromisoformat(dt_str)
+        day = dt.day
+        month = dt.strftime("%b")
+        return f" from {day} {month}"
+    except Exception:
+        return ""
+
+
 def download_pdf(url: str) -> bytes:
     """Download PDF with polite delay, browser User-Agent, exponential backoff, and local disk cache."""
     url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
@@ -93,20 +217,20 @@ def download_pdf(url: str) -> bytes:
 
     for attempt, delay in enumerate(backoff_delays, start=1):
         try:
-            time.sleep(1)  # Polite delay to NSE / sources
+            time.sleep(1)  # Polite delay
             response = requests.get(url, headers=headers, timeout=30)
             if response.status_code == 200:
                 content = response.content
                 local_path.write_bytes(content)
                 return content
-            logger.warning("PDF download status %d for %s (attempt %d)", response.status_code, url, attempt)
+            logger.warning("Download status %d for %s (attempt %d)", response.status_code, url, attempt)
         except Exception as exc:
-            logger.warning("PDF download failed for %s (attempt %d): %s", url, attempt, exc)
+            logger.warning("Download failed for %s (attempt %d): %s", url, attempt, exc)
 
         if attempt < len(backoff_delays):
             time.sleep(delay)
 
-    raise RuntimeError(f"Failed to download PDF from {url} after {len(backoff_delays)} attempts")
+    raise RuntimeError(f"Failed to download attachment from {url} after {len(backoff_delays)} attempts")
 
 
 def extract_pdf_from_bytes(data: bytes) -> bytes:
@@ -191,24 +315,23 @@ def search_serper(query: str) -> dict[str, Any]:
     return {}
 
 
-def synthesize_bio(
+def _lookup_bio_query(
     name: str,
     role: str,
     company: str,
+    query: str,
     bio_template: str,
 ) -> tuple[str | None, str | None]:
-    """Look up person bio on LinkedIn via Serper and synthesize using Gemini bulk model."""
-    query = f'"{name}" "{company}" linkedin'
-    logger.info("Looking up LinkedIn bio for %s at %s (query: %s)", name, company, query)
-
+    """Run search query through Serper and prompt Gemini v2 to synthesize a bio."""
+    logger.info("Searching Serper with query: %s", query)
     search_data = search_serper(query)
     organic = search_data.get("organic") or []
 
     if not organic:
-        logger.info("No organic search results found for %s", query)
+        logger.info("No organic search results found for query: %s", query)
         return None, None
 
-    # Format the prompt with top 3 organic results (use .replace to avoid KeyError on JSON braces)
+    # Format prompt using replace to avoid KeyError on JSON braces
     base_prompt = (
         bio_template.replace("{name}", name)
         .replace("{role}", role)
@@ -224,130 +347,299 @@ def synthesize_bio(
     full_prompt = base_prompt + "\n" + "\n".join(results_snippets)
 
     try:
-        res = call_json(task="bulk", prompt=full_prompt, prompt_version="v1")
+        res = call_json(task="bulk", prompt=full_prompt, prompt_version="v2")
         if isinstance(res, dict):
             bio = res.get("bio")
             source_url = res.get("source_url")
             if bio:
                 return bio.strip(), source_url
     except Exception as exc:
-        logger.error("Error synthesizing bio for %s: %s", name, exc)
+        logger.error("Error synthesizing bio for query '%s': %s", query, exc)
 
     return None, None
 
 
-def normalize_role(role: str) -> str:
-    """Standardize role titles for concise, readable headlines."""
-    if not role:
-        return ""
-    r = role.strip()
-    r_lower = r.lower()
+def synthesize_bio(
+    name: str,
+    role: str,
+    company: str,
+    bio_template: str,
+) -> tuple[str | None, str | None]:
+    """Look up person bio via strict search, and fallback to role-short-form search if no match."""
+    clean_name = clean_person_name(name)
+    role_short = get_role_short_form(role)
 
-    if "chief financial officer" in r_lower or r_lower == "cfo":
-        return "CFO"
-    if (
-        "managing director & chief executive officer" in r_lower
-        or "managing director and chief executive officer" in r_lower
-        or "md & ceo" in r_lower
-        or "md and ceo" in r_lower
-    ):
-        return "MD & CEO"
-    if "chief executive officer" in r_lower or r_lower == "ceo":
-        return "CEO"
-    if "managing director" in r_lower or r_lower == "md":
-        return "MD"
-    if "deputy managing director" in r_lower or "deputy md" in r_lower:
-        return "Deputy MD"
-    if "whole-time director" in r_lower or "whole time director" in r_lower or r_lower == "wtd":
-        return "Whole-time Director"
-    if "statutory auditor" in r_lower:
-        return "Statutory Auditor"
-    if "independent director" in r_lower:
-        return "Independent Director"
-    if "chairman" in r_lower:
-        return "Chairman"
+    # 1. Strict search: "<name>" "<company>" linkedin
+    strict_query = f'"{clean_name}" "{company}" linkedin'
+    bio, src = _lookup_bio_query(clean_name, role, company, strict_query, bio_template)
+    if bio:
+        return bio, src
 
-    return r
+    # 2. Fallback search: "<name>" <role short form, e.g. CFO> linkedin (no company)
+    fallback_query = f'"{clean_name}" {role_short} linkedin'
+    logger.info("Strict search returned no match for %s. Trying fallback query: %s", clean_name, fallback_query)
+    return _lookup_bio_query(clean_name, role, company, fallback_query, bio_template)
 
 
-def format_effective_date(dt_str: str | None) -> str:
-    """Format YYYY-MM-DD date into ' from DD Mon', e.g. ' from 27 Oct'."""
-    if not dt_str:
-        return ""
-    try:
-        dt = datetime.date.fromisoformat(dt_str)
-        day = dt.day
-        month = dt.strftime("%b")
-        return f" from {day} {month}"
-    except Exception:
-        return ""
+def merge_people_entries(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge people with the same name in one filing into one entry.
+
+    e.g. 'N. Venkataraman moves from CFO to Deputy MD'
+    """
+    if not people:
+        return []
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for p in people:
+        raw_name = p.get("name") or ""
+        norm_name = clean_person_name(raw_name).lower()
+        if not norm_name:
+            continue
+        grouped.setdefault(norm_name, []).append(p)
+
+    merged: list[dict[str, Any]] = []
+    for norm_name, entries in grouped.items():
+        clean_name = clean_person_name(entries[0].get("name", ""))
+        if len(entries) == 1:
+            entry = dict(entries[0])
+            entry["name"] = clean_name
+            merged.append(entry)
+            continue
+
+        # Multiple entries for same person
+        # Check for moves / redesignations:
+        # e.g., one ceased/resigned from Role A, and one appointed/redesignated to Role B
+        left_entries = [
+            e for e in entries if (e.get("change") or "").lower() in ("ceased", "resigned", "stepped down")
+        ]
+        joined_entries = [
+            e for e in entries if (e.get("change") or "").lower() in ("appointed", "redesignated", "joined")
+        ]
+
+        if left_entries and joined_entries:
+            role_from = normalize_role(left_entries[0].get("role", ""))
+            role_to = normalize_role(joined_entries[0].get("role", ""))
+            combined_role = f"moves from {role_from} to {role_to}"
+            combined_change = "moves"
+            is_top = any(is_top_role_person(e) for e in entries)
+        else:
+            # Pick primary entry (highest role rank)
+            sorted_entries = sorted(
+                entries,
+                key=lambda e: (
+                    get_role_rank(normalize_role(e.get("role", ""))),
+                    get_action_rank(e.get("change", "")),
+                ),
+            )
+            primary = sorted_entries[0]
+            combined_role = primary.get("role", "")
+            combined_change = primary.get("change", "")
+            is_top = any(is_top_role_person(e) for e in entries)
+
+        eff_date = next((e.get("effective_date") for e in entries if e.get("effective_date")), None)
+        reason = next((e.get("reason") for e in entries if e.get("reason")), None)
+        profile = next((e.get("profile") for e in entries if e.get("profile")), None)
+        bio = next((e.get("bio") for e in entries if e.get("bio")), None)
+        bio_src = next((e.get("bio_source") for e in entries if e.get("bio_source")), None)
+
+        merged.append({
+            "name": clean_name,
+            "role": combined_role,
+            "change": combined_change,
+            "effective_date": eff_date,
+            "reason": reason,
+            "profile": profile,
+            "is_top_role": is_top,
+            "bio": bio,
+            "bio_source": bio_src,
+        })
+
+    return merged
+
+
+def get_role_rank(role: str) -> int:
+    """Rank roles: CEO/MD (1) > CFO (2) > Chairman (3) > Whole-time Director (4) > Other (5)."""
+    r = role.lower()
+    if "ceo" in r or "managing director" in r or "md" in r:
+        return 1
+    if "cfo" in r or "financial" in r:
+        return 2
+    if "chairman" in r:
+        return 3
+    if "whole-time director" in r or "whole time director" in r or "director" in r:
+        return 4
+    if "counsel" in r or "legal" in r or "compliance" in r or "auditor" in r:
+        return 5
+    return 6
+
+
+def get_action_rank(change: str) -> int:
+    """Rank actions: appointments and resignations (1) before redesignations (2)."""
+    c = change.lower()
+    if c in ("appointed", "resigned", "retired", "ceased"):
+        return 1
+    if c in ("redesignated", "moves"):
+        return 2
+    return 3
 
 
 def generate_mgmt_headline(
-    changes: list[dict[str, Any]],
+    people: list[dict[str, Any]],
     current_headline: str | None,
     current_subject: str,
-) -> tuple[str, bool]:
-    """Rewrite headline in Python for top-role changes.
+) -> str:
+    """Rewrite headline for every filing with people.
 
-    Returns:
-        (headline, has_top_role)
+    Rules:
+    - At most 2 changes, ordered CEO/MD > CFO > chairman > whole-time director;
+      appointments and resignations before redesignations.
+    - Strip Mr./Ms./Shri.
+    - Add '+N more' if there are other changes.
     """
-    top_changes = [c for c in changes if c.get("is_top_role")]
+    if not people:
+        return current_headline or current_subject or "Management Update"
 
-    if not top_changes:
-        # Non-top-role changes keep their headline
-        fallback = current_headline or current_subject or "Management Update"
-        return fallback, False
+    # Sort people according to precedence
+    sorted_people = sorted(
+        people,
+        key=lambda p: (
+            get_role_rank(normalize_role(p.get("role", ""))),
+            get_action_rank(p.get("change", "")),
+        ),
+    )
 
-    # Check for matching resignation & appointment pairs (e.g. CFO Rakesh Shah resigns; Arun Agrawal takes over)
-    handled_indices: set[int] = set()
-    pair_parts: list[str] = []
+    selected = sorted_people[:2]
+    remaining_count = len(sorted_people) - len(selected)
 
-    resigned_indices = [i for i, c in enumerate(top_changes) if (c.get("change") or "").lower() == "resigned"]
-    appointed_indices = [i for i, c in enumerate(top_changes) if (c.get("change") or "").lower() == "appointed"]
+    # Check if the 2 selected changes are a resignation and appointment for the same role
+    # e.g. "General Counsel Sudhir Kumar Jha retires; Jigar Shah appointed"
+    # or "CFO Rakesh Shah resigns; Arun Agrawal takes over"
+    parts: list[str] = []
+    if len(selected) == 2:
+        p0, p1 = selected[0], selected[1]
+        r0 = normalize_role(p0.get("role", ""))
+        r1 = normalize_role(p1.get("role", ""))
+        c0 = (p0.get("change") or "").lower()
+        c1 = (p1.get("change") or "").lower()
 
-    for r_idx in resigned_indices:
-        if r_idx in handled_indices:
+        if r0.lower() == r1.lower() and r0:
+            dt0 = format_effective_date(p0.get("effective_date"))
+            dt1 = format_effective_date(p1.get("effective_date"))
+            if c0 in ("resigned", "retired", "ceased") and c1 == "appointed":
+                verb0 = "retires" if c0 == "retired" else ("resigns" if c0 == "resigned" else "ceases office")
+                parts = [f"{r0} {p0['name']} {verb0}{dt0}", f"{p1['name']} appointed{dt1}"]
+            elif c1 in ("resigned", "retired", "ceased") and c0 == "appointed":
+                verb1 = "retires" if c1 == "retired" else ("resigns" if c1 == "resigned" else "ceases office")
+                parts = [f"{r1} {p1['name']} {verb1}{dt1}", f"{p0['name']} appointed{dt0}"]
+
+    if not parts:
+        for p in selected:
+            name = clean_person_name(p.get("name", ""))
+            role = normalize_role(p.get("role", ""))
+            change = (p.get("change") or "").lower().strip()
+            dt_suffix = format_effective_date(p.get("effective_date"))
+
+            if change == "moves" or "moves from" in role:
+                parts.append(f"{name} {role}{dt_suffix}")
+            elif change == "appointed":
+                parts.append(f"{name} appointed {role}{dt_suffix}")
+            elif change == "resigned":
+                parts.append(f"{role} {name} resigns{dt_suffix}")
+            elif change == "retired":
+                parts.append(f"{role} {name} retires{dt_suffix}")
+            elif change == "ceased":
+                parts.append(f"{role} {name} ceases office{dt_suffix}")
+            elif change == "redesignated":
+                parts.append(f"{name} redesignated {role}{dt_suffix}")
+            else:
+                parts.append(f"{name} {change} as {role}{dt_suffix}")
+
+    headline = "; ".join(parts)
+    if remaining_count > 0:
+        headline += f"; +{remaining_count} more"
+
+    return headline
+
+
+def determine_priority(people: list[dict[str, Any]]) -> int:
+    """Determine filing priority based on top-role changes.
+
+    - Any top-role appointment or resignation (including CFO-designate) is priority 1.
+    - Redesignations only are priority 2.
+    - Other changes are priority 2.
+    """
+    if not people:
+        return 2
+
+    has_appoint_or_resign = any(
+        is_top_role_person(p) and (p.get("change") or "").lower() in ("appointed", "resigned", "retired", "ceased")
+        for p in people
+    )
+    if has_appoint_or_resign:
+        return 1
+
+    has_top_role = any(is_top_role_person(p) for p in people)
+    if has_top_role:
+        return 2
+
+    return 2
+
+
+def deduplicate_filings(filings: list[dict[str, Any]]) -> None:
+    """Check for duplicate filings for the same ticker within 7 days.
+
+    Keep the earliest and set the others to priority 3 with headline 'Duplicate of earlier filing'.
+    """
+    client = get_client()
+    by_ticker: dict[str, list[dict[str, Any]]] = {}
+    for f in filings:
+        t = f.get("ticker")
+        if t:
+            by_ticker.setdefault(t, []).append(f)
+
+    for ticker, group in by_ticker.items():
+        if len(group) < 2:
             continue
-        res = top_changes[r_idx]
-        res_role = normalize_role(res.get("role", ""))
-        for a_idx in appointed_indices:
-            if a_idx in handled_indices:
+
+        # Sort earliest first
+        sorted_group = sorted(group, key=lambda x: x.get("filed_at") or "")
+
+        for i in range(len(sorted_group)):
+            earlier = sorted_group[i]
+            earlier_people = earlier.get("people") or []
+            if not earlier_people:
                 continue
-            app = top_changes[a_idx]
-            app_role = normalize_role(app.get("role", ""))
-            if res_role.lower() == app_role.lower() and res_role:
-                handled_indices.add(r_idx)
-                handled_indices.add(a_idx)
-                dt_suffix = format_effective_date(app.get("effective_date") or res.get("effective_date"))
-                pair_parts.append(f"{res_role} {res.get('name')} resigns; {app.get('name')} takes over{dt_suffix}")
-                break
+            earlier_names = {clean_person_name(p.get("name", "")).lower() for p in earlier_people}
 
-    parts: list[str] = list(pair_parts)
-    for i, c in enumerate(top_changes):
-        if i in handled_indices:
-            continue
-        name = (c.get("name") or "").strip()
-        role = normalize_role(c.get("role") or "")
-        change = (c.get("change") or "").lower().strip()
-        dt_suffix = format_effective_date(c.get("effective_date"))
+            for j in range(i + 1, len(sorted_group)):
+                later = sorted_group[j]
+                later_people = later.get("people") or []
+                if not later_people:
+                    continue
+                later_names = {clean_person_name(p.get("name", "")).lower() for p in later_people}
 
-        if change == "appointed":
-            parts.append(f"{name} appointed {role}{dt_suffix}")
-        elif change == "resigned":
-            parts.append(f"{role} {name} resigns{dt_suffix}")
-        elif change == "retired":
-            parts.append(f"{role} {name} retires{dt_suffix}")
-        elif change == "redesignated":
-            parts.append(f"{name} redesignated {role}{dt_suffix}")
-        elif change == "ceased":
-            parts.append(f"{role} {name} ceases office{dt_suffix}")
-        else:
-            parts.append(f"{name} {change} as {role}{dt_suffix}")
+                if earlier_names == later_names:
+                    # Check date diff <= 7 days
+                    dt_earlier = datetime.datetime.fromisoformat(earlier["filed_at"])
+                    dt_later = datetime.datetime.fromisoformat(later["filed_at"])
+                    diff_days = abs((dt_later - dt_earlier).total_seconds()) / 86400.0
 
-    headline = "; ".join(parts) if parts else (current_headline or current_subject)
-    return headline, True
+                    if diff_days <= 7.0:
+                        logger.info(
+                            "[%s] Filing %s is a duplicate of earlier filing %s (diff: %.1f days). Setting priority 3.",
+                            ticker,
+                            later["id"],
+                            earlier["id"],
+                            diff_days,
+                        )
+                        later["priority"] = 3
+                        later["new_headline"] = "Duplicate of earlier filing"
+
+                        # Persist to Supabase
+                        client.table("filings").update({
+                            "priority": 3,
+                            "summary": "Duplicate of earlier filing",
+                        }).eq("id", later["id"]).execute()
 
 
 def find_mgmt_filings(lookback_days: int = 45, force: bool = False) -> list[dict[str, Any]]:
@@ -373,7 +665,7 @@ def find_mgmt_filings(lookback_days: int = 45, force: bool = False) -> list[dict
     else:
         pending = rows
 
-    logger.info("Found %d total management_change filings (%d pending enrichment).", len(rows), len(pending))
+    logger.info("Found %d total management_change filings (%d to process).", len(rows), len(pending))
     return pending
 
 
@@ -431,13 +723,13 @@ def enrich_mgmt_filing(
     logger.info("[%s] Extracted %d person change(s) from filing %s", ticker, len(changes), filing_id)
 
     # 3. For each person, attach bio and bio_source
-    enriched_people: list[dict[str, Any]] = []
+    raw_people: list[dict[str, Any]] = []
     for p in changes:
-        p_name = (p.get("name") or "").strip()
+        p_name = clean_person_name(p.get("name") or "")
         p_role = (p.get("role") or "").strip()
         p_change = (p.get("change") or "").lower().strip()
         p_profile = p.get("profile")
-        p_is_top = bool(p.get("is_top_role"))
+        p_is_top = is_top_role_person(p)
 
         bio: str | None = None
         bio_source: str | None = None
@@ -446,7 +738,7 @@ def enrich_mgmt_filing(
             bio = p_profile.strip()
             bio_source = "filing"
         elif p_change == "appointed" and p_is_top and not p_profile:
-            # Need web lookup
+            # Need web lookup (strict + fallback)
             searched_bio, search_source = synthesize_bio(
                 name=p_name,
                 role=p_role,
@@ -458,33 +750,35 @@ def enrich_mgmt_filing(
 
         person_data = {
             **p,
+            "name": p_name,
+            "is_top_role": p_is_top,
             "bio": bio,
             "bio_source": bio_source,
         }
-        enriched_people.append(person_data)
+        raw_people.append(person_data)
 
-    # 4. Rewrite headline and handle priority
+    # 4. Merge people with the same name in one filing
+    merged_people = merge_people_entries(raw_people)
+
+    # 5. Rewrite headline for every filing with people
     current_summary = filing.get("summary")
     current_subject = filing.get("subject", "")
-    new_headline, has_top_role = generate_mgmt_headline(enriched_people, current_summary, current_subject)
+    new_headline = generate_mgmt_headline(merged_people, current_summary, current_subject)
 
-    # 5. Save to database
+    # 6. Calculate priority
+    calculated_priority = determine_priority(merged_people)
+
+    # 7. Save to database
     client = get_client()
     enr = filing.get("enrichment") or {}
-    enr["people"] = enriched_people
+    enr["people"] = merged_people
 
     update_payload: dict[str, Any] = {
         "enrichment": enr,
+        "summary": new_headline,
+        "priority": calculated_priority,
         "processed_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
-
-    if has_top_role:
-        update_payload["summary"] = new_headline
-    else:
-        # Non-top-role changes keep their headline; if the filing has no top-role change, lower priority to 2
-        if filing.get("priority") == 1:
-            logger.info("[%s] No top-role change found for filing %s; lowering priority 1 -> 2.", ticker, filing_id)
-            update_payload["priority"] = 2
 
     client.table("filings").update(update_payload).eq("id", filing_id).execute()
 
@@ -493,9 +787,9 @@ def enrich_mgmt_filing(
         "id": filing_id,
         "filed_at": filing.get("filed_at"),
         "old_headline": current_summary or current_subject,
-        "new_headline": update_payload.get("summary", current_summary or current_subject),
-        "priority": update_payload.get("priority", filing.get("priority")),
-        "people": enriched_people,
+        "new_headline": new_headline,
+        "priority": calculated_priority,
+        "people": merged_people,
     }
 
 
@@ -503,10 +797,10 @@ def run_pipeline(lookback_days: int = 45, force: bool = False) -> list[dict[str,
     """Execute management change enrichment pipeline."""
     mgmt_prompt, bio_prompt = load_prompt_templates()
     company_names = get_company_names()
-    pending = find_mgmt_filings(lookback_days=lookback_days, force=force)
+    filings = find_mgmt_filings(lookback_days=lookback_days, force=force)
 
     results: list[dict[str, Any]] = []
-    for f in pending:
+    for f in filings:
         try:
             res = enrich_mgmt_filing(f, mgmt_prompt, bio_prompt, company_names)
             if res:
@@ -514,29 +808,36 @@ def run_pipeline(lookback_days: int = 45, force: bool = False) -> list[dict[str,
         except Exception as exc:
             logger.error("Failed processing management change for %s (%s): %s", f.get("ticker"), f.get("id"), exc)
 
+    # Check and apply 7-day duplicate resolution
+    deduplicate_filings(results)
+
     return results
 
 
-def print_summary(records: list[dict[str, Any]]) -> None:
-    """Print clean summary showing each management filing."""
+def print_requested_summary(records: list[dict[str, Any]], target_tickers: set[str] | None = None) -> None:
+    """Print clean summary showing management filings for target companies."""
     print("\n" + "=" * 90)
     print("FINN MANAGEMENT CHANGE ENRICHMENT SUMMARY")
     print("=" * 90)
 
-    if not records:
-        print("No management change filings were processed in this run.")
+    filtered = [r for r in records if (not target_tickers or r["ticker"] in target_tickers)]
+
+    if not filtered:
+        print("No management change filings matched the filter criteria.")
         print("=" * 90 + "\n")
         return
 
-    for idx, r in enumerate(records, start=1):
+    company_names = get_company_names()
+    for idx, r in enumerate(filtered, start=1):
         ticker = r["ticker"]
+        c_name = company_names.get(ticker, ticker)
         new_headline = r["new_headline"]
         people = r.get("people") or []
         priority = r.get("priority")
 
-        print(f"\n[{idx}] {ticker} (Priority {priority})")
+        print(f"\n[{idx}] {c_name} ({ticker}) — Priority {priority}")
         print(f"    Headline: {new_headline}")
-        print("    People changes:")
+        print("    People changes & Bios:")
         if not people:
             print("      (No individuals extracted)")
         for p in people:
@@ -554,7 +855,7 @@ def print_summary(records: list[dict[str, Any]]) -> None:
                 print(f"        Bio: None (source: {source})")
 
     print("\n" + "-" * 90)
-    print(f"Total management filings enriched: {len(records)}")
+    print(f"Total management filings displayed: {len(filtered)}")
     print("=" * 90 + "\n")
 
 
@@ -565,7 +866,10 @@ def main() -> None:
     args = parser.parse_args()
 
     records = run_pipeline(lookback_days=args.days, force=args.force)
-    print_summary(records)
+
+    # Show only Home First, Nazara, Pidilite, and HDFC Bank
+    target_tickers = {"HOMEFIRST", "NAZARA", "PIDILITIND", "HDFCBANK"}
+    print_requested_summary(records, target_tickers=target_tickers)
 
 
 if __name__ == "__main__":
