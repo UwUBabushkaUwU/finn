@@ -32,7 +32,7 @@ logging.getLogger("yfinance").setLevel(logging.WARNING)
 
 
 def filter_completed_trading_days(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop today's date from downloaded data if running before 4:00 PM IST on a weekday.
+    """Drop today's date from downloaded data if running before 4:00 PM IST.
 
     Only completed trading days should be saved.
     """
@@ -40,16 +40,14 @@ def filter_completed_trading_days(df: pd.DataFrame) -> pd.DataFrame:
         return df
 
     ist_now = datetime.datetime.now(ZoneInfo("Asia/Kolkata"))
-    is_weekday = ist_now.weekday() < 5
     is_before_4pm = ist_now.time() < datetime.time(16, 0)
 
-    if is_weekday and is_before_4pm:
+    if is_before_4pm:
         today_str = ist_now.date().isoformat()
         mask = [dt.strftime("%Y-%m-%d") != today_str for dt in df.index]
         if not all(mask):
             logger.info(
-                "Running before 4:00 PM IST on a weekday (%s %s IST). Dropping incomplete trading day %s.",
-                ist_now.strftime("%A"),
+                "Running before 4:00 PM IST (%s IST). Dropping incomplete trading day %s.",
                 ist_now.strftime("%H:%M"),
                 today_str,
             )
