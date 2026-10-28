@@ -397,6 +397,7 @@ def process_results_data(raw_data: dict[str, Any], source_pdf_url: str) -> dict[
             "associates_after_tax": associates_after_tax,
             "is_lender": is_lender,
             "verified": verified,
+            "check": not verified,
             "column_diffs": column_diffs,
             "check_diff": round(check_diff, 2),
             "page": raw_data.get("page"),

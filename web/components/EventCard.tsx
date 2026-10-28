@@ -4,6 +4,8 @@ import { useState } from "react";
 import { GroupedEvent } from "@/lib/types";
 import { formatFilingTime } from "@/lib/time";
 import { formatCategory } from "@/lib/grouping";
+import { ResultsBlock } from "./ResultsBlock";
+import { PeopleBlock } from "./PeopleBlock";
 
 interface EventCardProps {
   event: GroupedEvent;
@@ -15,6 +17,17 @@ export function EventCard({ event, isCompact = false }: EventCardProps) {
   const isPriority1 = event.priority === 1;
   const hasSecondary = event.secondaryFilings.length > 0;
 
+  // Determine if results block should have "Also: Q2 results" prefix
+  const isSecondaryResults =
+    Boolean(event.resultsEnrichment) &&
+    event.category.toLowerCase() !== "results";
+
+  // Noise filter for Details box
+  const hasValidDescription =
+    Boolean(event.primaryFiling.description) &&
+    !event.primaryFiling.description?.includes("has informed the Exchange") &&
+    event.primaryFiling.description !== event.headline;
+
   return (
     <article
       onClick={() => setExpanded(!expanded)}
@@ -24,21 +37,29 @@ export function EventCard({ event, isCompact = false }: EventCardProps) {
           : "border-neutral-200 dark:border-neutral-800/80 bg-neutral-50/40 dark:bg-neutral-900/40 hover:bg-white dark:hover:bg-neutral-900"
       } ${isCompact ? "p-2.5" : "p-3"}`}
     >
-      {/* Header row: Ticker, Company, Category, Time */}
+      {/* Header row: Ticker, Company, Category Chips, Time */}
       <div className="flex items-center gap-2 justify-between">
         <div className="flex items-baseline gap-1.5 min-w-0">
           <span className="font-mono font-bold text-sm tracking-tight text-neutral-950 dark:text-neutral-50">
             {event.ticker}
           </span>
-          <span className="text-xs text-neutral-500 dark:text-neutral-400 truncate max-w-[130px] sm:max-w-[200px]">
+          <span className="text-xs text-neutral-500 dark:text-neutral-400 truncate max-w-[120px] sm:max-w-[200px]">
             {event.companyName}
           </span>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
-          <span className="inline-block text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.2 rounded border border-neutral-200 dark:border-neutral-700/80 text-neutral-600 dark:text-neutral-300 bg-neutral-100/50 dark:bg-neutral-800/50">
-            {event.category}
-          </span>
+        <div className="flex items-center gap-1.5 shrink-0 flex-wrap justify-end">
+          {(event.categories && event.categories.length > 0
+            ? event.categories
+            : [event.category]
+          ).map((cat) => (
+            <span
+              key={cat}
+              className="inline-block text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.2 rounded border border-neutral-200 dark:border-neutral-700/80 text-neutral-600 dark:text-neutral-300 bg-neutral-100/50 dark:bg-neutral-800/50"
+            >
+              {cat}
+            </span>
+          ))}
           <time className="text-[11px] font-mono tabular-nums text-neutral-500 dark:text-neutral-400">
             {formatFilingTime(event.filedAt)}
           </time>
@@ -56,8 +77,24 @@ export function EventCard({ event, isCompact = false }: EventCardProps) {
         {event.headline}
       </p>
 
+      {/* Results Block (if event has results enrichment) */}
+      {event.resultsEnrichment && (
+        <ResultsBlock
+          results={event.resultsEnrichment}
+          isAlso={isSecondaryResults}
+        />
+      )}
+
+      {/* People Block (if event has people enrichment) */}
+      {event.peopleEnrichment && event.peopleEnrichment.length > 0 && (
+        <PeopleBlock
+          people={event.peopleEnrichment}
+          companyName={event.companyName}
+        />
+      )}
+
       {/* Footer row: +N more badge & PDF link */}
-      <div className="mt-2 flex items-center justify-between text-xs pt-1 border-t border-neutral-100 dark:border-neutral-850">
+      <div className="mt-2.5 flex items-center justify-between text-xs pt-1.5 border-t border-neutral-150 dark:border-neutral-850">
         <div className="flex items-center gap-2">
           {hasSecondary && (
             <span
@@ -91,7 +128,7 @@ export function EventCard({ event, isCompact = false }: EventCardProps) {
           className="mt-3 pt-2.5 border-t border-neutral-200 dark:border-neutral-800 space-y-2 text-xs"
           onClick={(e) => e.stopPropagation()}
         >
-          {event.primaryFiling.description && event.primaryFiling.description !== event.headline && (
+          {hasValidDescription && (
             <div className="text-[11px] text-neutral-600 dark:text-neutral-400 bg-neutral-100/60 dark:bg-neutral-800/60 p-2 rounded">
               <span className="font-mono font-semibold uppercase text-[10px] text-neutral-400 dark:text-neutral-500 block mb-0.5">
                 Details

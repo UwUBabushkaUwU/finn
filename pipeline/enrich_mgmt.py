@@ -71,7 +71,7 @@ CACHE_PDF_DIR = PROJECT_ROOT / "pipeline" / "cache" / "pdfs"
 CACHE_PDF_DIR.mkdir(parents=True, exist_ok=True)
 
 PROMPT_MGMT_FILE = PROJECT_ROOT / "pipeline" / "prompts" / "mgmt_v1.txt"
-PROMPT_BIO_FILE = PROJECT_ROOT / "pipeline" / "prompts" / "bio_v2.txt"
+PROMPT_BIO_FILE = PROJECT_ROOT / "pipeline" / "prompts" / "bio_v3.txt"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -347,7 +347,7 @@ def _lookup_bio_query(
     full_prompt = base_prompt + "\n" + "\n".join(results_snippets)
 
     try:
-        res = call_json(task="bulk", prompt=full_prompt, prompt_version="v2")
+        res = call_json(task="bulk", prompt=full_prompt, prompt_version="v3")
         if isinstance(res, dict):
             bio = res.get("bio")
             source_url = res.get("source_url")

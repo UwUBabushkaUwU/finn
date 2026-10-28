@@ -1,0 +1,11 @@
+Below are web search results about {name}, newly appointed as {role} at {company}. Write their professional background in at most 2 sentences: where they came from (previous employers and roles, e.g. "Previously CFO at X; before that Y"), and education if shown.
+
+A result counts as a match when the name matches and it clearly refers to this person: either by linking to {company} or the role, OR by showing a senior role in the same function (e.g. finance for a CFO, technology/operations for a CTO/COO), even at a different company since new appointees' profiles often still show their previous employer.
+
+Rules:
+- Never mention what information is missing.
+- Never describe the role they are being appointed to.
+- Write complete sentences only.
+- If the only matching facts are about the new role, return null.
+
+If no result clearly matches, or if two different people could match the results, return {"bio": null, "source_url": null}. Otherwise return {"bio": "...", "source_url": "<the link you used>"}.

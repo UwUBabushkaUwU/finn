@@ -10,7 +10,8 @@ export function formatCategory(cat?: string | null): string {
     case "management_change":
       return "Mgmt Change";
     case "acquisition":
-      return "Acquisition";
+    case "m&a":
+      return "M&A";
     case "regulatory":
       return "Regulatory";
     case "dividend":
@@ -115,6 +116,28 @@ export function groupFilingsIntoEvents(
     const company = companiesMap[cluster.ticker];
     const companyName = company?.name || cluster.ticker;
 
+    // Distinct categories in the group (max 3, e.g. M&A, RESULTS)
+    const categorySet = new Set<string>();
+    categorySet.add(category);
+    for (const f of sortedCluster) {
+      if (f.category) {
+        categorySet.add(formatCategory(f.category));
+      }
+    }
+    const categories = Array.from(categorySet).slice(0, 3);
+
+    // Look for results enrichment in any filing in this cluster
+    const resultsFiling = sortedCluster.find(
+      (f) => f.enrichment?.results && f.enrichment.results.metrics
+    );
+    const resultsEnrichment = resultsFiling?.enrichment?.results || null;
+
+    // Look for people enrichment in any filing in this cluster
+    const peopleFiling = sortedCluster.find(
+      (f) => f.enrichment?.people && f.enrichment.people.length > 0
+    );
+    const peopleEnrichment = peopleFiling?.enrichment?.people || null;
+
     // Use latest filing's timestamp in the cluster for event freshness
     const latestFiledAt = new Date(cluster.latestTime).toISOString();
 
@@ -125,10 +148,13 @@ export function groupFilingsIntoEvents(
       priority: cardPriority,
       headline,
       category,
+      categories,
       filedAt: latestFiledAt,
       attachmentUrl: primaryFiling.attachment_url || null,
       primaryFiling,
       secondaryFilings,
+      resultsEnrichment,
+      peopleEnrichment,
     };
   });
 }
