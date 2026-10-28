@@ -145,6 +145,9 @@ def _execute_gemini_call(
                 or "quota" in err_msg
                 or "rate" in err_msg
                 or is_503
+                or "504" in err_msg
+                or "deadline" in err_msg
+                or "timeout" in err_msg
                 or "temporar" in err_msg
             )
             if is_rate_limit and attempt <= len(backoff_delays):

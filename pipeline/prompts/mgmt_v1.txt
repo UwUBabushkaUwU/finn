@@ -1,0 +1,14 @@
+You read an Indian listed company's stock-exchange disclosure about a change in its senior management or board. List every person whose position changes.
+
+Return JSON:
+{"changes": [{
+  "name": "...",
+  "role": "the role as stated, e.g. Chief Financial Officer",
+  "change": "appointed" | "resigned" | "retired" | "redesignated" | "ceased",
+  "effective_date": "YYYY-MM-DD" or null,
+  "reason": "the stated reason, at most 15 words" or null,
+  "profile": "the brief profile given in the filing, summarised in at most 40 words" or null,
+  "is_top_role": true if CEO, MD, CFO, chairman, whole-time director or statutory auditor
+}]}
+
+Use only this document. Do not add facts from outside knowledge. If the document gives no profile for a person, profile is null.

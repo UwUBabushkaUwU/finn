@@ -50,6 +50,14 @@ jobs:
           SEARCH_API_KEY: ${{ secrets.SEARCH_API_KEY }}
         run: python -m pipeline.enrich_results
 
+      - name: Enrich management changes
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+          SEARCH_API_KEY: ${{ secrets.SEARCH_API_KEY }}
+        run: python -m pipeline.enrich_mgmt
+
       - name: Generate alerts
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
