@@ -47,9 +47,12 @@ def get_gemini_client() -> genai.Client:
     return _client
 
 
-def compute_cache_key(model: str, prompt_version: str, prompt: str) -> str:
-    """Compute sha256(model + prompt_version + prompt)."""
-    raw = f"{model}{prompt_version}{prompt}"
+def compute_cache_key(
+    model: str, prompt_version: str, prompt: str, pdf_bytes: bytes | None = None
+) -> str:
+    """Compute sha256(model + prompt_version + prompt + sha256(pdf_bytes))."""
+    pdf_hash = hashlib.sha256(pdf_bytes).hexdigest() if pdf_bytes else ""
+    raw = f"{model}{prompt_version}{prompt}{pdf_hash}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -81,16 +84,25 @@ def save_cache(cache_key: str, task: str, model: str, output: Any) -> None:
         logger.warning("Error saving to llm_cache: %s", exc)
 
 
-def _execute_gemini_call(model: str, prompt: str) -> dict[str, Any] | list[Any]:
+def _execute_gemini_call(
+    model: str, prompt: str, pdf_bytes: bytes | None = None
+) -> dict[str, Any] | list[Any]:
     """Execute Gemini generate_content with JSON mode and rate-limit backoff."""
     client = get_gemini_client()
     backoff_delays = [10, 30, 60]
+
+    contents: list[Any] | str
+    if pdf_bytes:
+        pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
+        contents = [pdf_part, prompt]
+    else:
+        contents = prompt
 
     for attempt, delay in enumerate(backoff_delays, start=1):
         try:
             response = client.models.generate_content(
                 model=model,
-                contents=prompt,
+                contents=contents,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                 ),
@@ -98,21 +110,27 @@ def _execute_gemini_call(model: str, prompt: str) -> dict[str, Any] | list[Any]:
             text = (response.text or "").strip()
             return json.loads(text)
         except Exception as exc:
-            # Check for rate-limiting or server quota issues
+            # Check for rate-limiting, temporary spikes, or server issues
             err_msg = str(exc).lower()
             is_rate_limit = (
                 "429" in err_msg
                 or "resource_exhausted" in err_msg
                 or "quota" in err_msg
                 or "rate" in err_msg
+                or "503" in err_msg
+                or "unavailable" in err_msg
+                or "high demand" in err_msg
+                or "temporar" in err_msg
             )
             if is_rate_limit and attempt <= len(backoff_delays):
                 _stats["retries"] += 1
                 logger.warning(
-                    "Rate limit hit calling %s (attempt %d). Waiting %ds before retry...",
+                    "Retryable error calling %s (attempt %d/%d). Waiting %ds before retry: %s",
                     model,
                     attempt,
+                    len(backoff_delays),
                     delay,
+                    exc,
                 )
                 time.sleep(delay)
             else:
@@ -122,13 +140,16 @@ def _execute_gemini_call(model: str, prompt: str) -> dict[str, Any] | list[Any]:
     raise RuntimeError(f"Exhausted retries calling model {model}")
 
 
-def call_json(task: str, prompt: str, prompt_version: str) -> dict[str, Any] | list[Any]:
+def call_json(
+    task: str, prompt: str, prompt_version: str, pdf_bytes: bytes | None = None
+) -> dict[str, Any] | list[Any]:
     """Execute a structured JSON LLM call with caching and rate-limit backoff.
 
     Args:
         task: "bulk" or "reasoning" (picks model from pipeline.config.MODEL_IDS).
         prompt: Full prompt string.
         prompt_version: Version tag (e.g. "v1") included in cache key.
+        pdf_bytes: Optional raw PDF file bytes to send as an application/pdf part.
 
     Returns:
         Parsed dict or list from the model JSON response.
@@ -137,7 +158,7 @@ def call_json(task: str, prompt: str, prompt_version: str) -> dict[str, Any] | l
     if not model:
         raise ValueError(f"Unknown LLM task '{task}'. Valid tasks: {list(MODEL_IDS.keys())}")
 
-    cache_key = compute_cache_key(model, prompt_version, prompt)
+    cache_key = compute_cache_key(model, prompt_version, prompt, pdf_bytes=pdf_bytes)
 
     cached_output = check_cache(cache_key)
     if cached_output is not None:
@@ -146,9 +167,30 @@ def call_json(task: str, prompt: str, prompt_version: str) -> dict[str, Any] | l
 
     # Cache miss: call model
     _stats["real_calls"] += 1
-    output = _execute_gemini_call(model, prompt)
-    save_cache(cache_key, task, model, output)
-    return output
+    try:
+        output = _execute_gemini_call(model, prompt, pdf_bytes=pdf_bytes)
+        save_cache(cache_key, task, model, output)
+        return output
+    except Exception as exc:
+        bulk_model = MODEL_IDS.get("bulk")
+        if task == "reasoning" and bulk_model and bulk_model != model:
+            logger.warning(
+                "Primary model %s failed (%s). Falling back to bulk model %s...",
+                model,
+                exc,
+                bulk_model,
+            )
+            fallback_key = compute_cache_key(bulk_model, prompt_version, prompt, pdf_bytes=pdf_bytes)
+            fallback_cached = check_cache(fallback_key)
+            if fallback_cached is not None:
+                _stats["cache_hits"] += 1
+                return fallback_cached
+
+            output = _execute_gemini_call(bulk_model, prompt, pdf_bytes=pdf_bytes)
+            save_cache(cache_key, task, bulk_model, output)
+            save_cache(fallback_key, task, bulk_model, output)
+            return output
+        raise exc
 
 
 def get_cache_stats() -> dict[str, int]:

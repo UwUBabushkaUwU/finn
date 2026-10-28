@@ -161,4 +161,4 @@ alerts:
 # Model routing. Check the current model ids in AI Studio before phase 2.
 models:
   bulk: gemini-flash-lite-latest   # classify, summarise, extract
-  reasoning: gemini-flash-latest   # results cross-check, research
+  reasoning: gemini-flash-lite-latest   # results cross-check, research
