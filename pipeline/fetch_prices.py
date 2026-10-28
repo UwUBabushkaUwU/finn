@@ -5,6 +5,7 @@ Computes pct_change, vol_avg_20, and vol_ratio for each ticker and date.
 
 from typing import Any
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import sys
 import argparse
 import datetime
@@ -28,6 +29,33 @@ logger = logging.getLogger("fetch_prices")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 logging.getLogger("yfinance").setLevel(logging.WARNING)
+
+
+def filter_completed_trading_days(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop today's date from downloaded data if running before 4:00 PM IST on a weekday.
+
+    Only completed trading days should be saved.
+    """
+    if df.empty:
+        return df
+
+    ist_now = datetime.datetime.now(ZoneInfo("Asia/Kolkata"))
+    is_weekday = ist_now.weekday() < 5
+    is_before_4pm = ist_now.time() < datetime.time(16, 0)
+
+    if is_weekday and is_before_4pm:
+        today_str = ist_now.date().isoformat()
+        mask = [dt.strftime("%Y-%m-%d") != today_str for dt in df.index]
+        if not all(mask):
+            logger.info(
+                "Running before 4:00 PM IST on a weekday (%s %s IST). Dropping incomplete trading day %s.",
+                ist_now.strftime("%A"),
+                ist_now.strftime("%H:%M"),
+                today_str,
+            )
+            df = df[mask]
+
+    return df
 
 
 def to_python_num(val: Any, target_type: type = float) -> float | int | None:
@@ -151,6 +179,7 @@ def fetch_and_store_prices(days: int = 90) -> dict[str, Any]:
         }
 
     raw_df = download_prices(tickers, days=days)
+    raw_df = filter_completed_trading_days(raw_df)
 
     all_rows: list[dict[str, Any]] = []
     tickers_fetched: list[str] = []
