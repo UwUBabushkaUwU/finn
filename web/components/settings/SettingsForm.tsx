@@ -401,3 +401,4 @@ export function SettingsForm({ initialSettings, portfolioCompanies }: SettingsFo
     </form>
   );
 }
+
