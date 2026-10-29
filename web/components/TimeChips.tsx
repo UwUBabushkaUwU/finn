@@ -15,11 +15,11 @@ export function TimeChips() {
   const currentWindow = searchParams.get("w") || "24h";
 
   return (
-    <nav aria-label="Time window filter" className="flex items-center gap-1.5 py-2.5">
-      <span className="text-[11px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500 mr-1">
+    <nav aria-label="Time window filter" className="flex items-center gap-2 py-1">
+      <span className="text-[11px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500 shrink-0">
         Window:
       </span>
-      <div className="flex gap-1.5">
+      <div className="flex gap-1.5 flex-wrap">
         {WINDOWS.map(({ key, label }) => {
           const isActive = currentWindow === key;
           const href = key === "24h" ? "/" : `/?w=${key}`;
@@ -29,7 +29,7 @@ export function TimeChips() {
               key={key}
               href={href}
               scroll={false}
-              className={`px-2.5 py-1 text-xs font-mono tabular-nums rounded border transition-colors ${
+              className={`min-h-[44px] min-w-[44px] px-3 py-2 text-xs font-mono tabular-nums rounded border transition-colors inline-flex items-center justify-center ${
                 isActive
                   ? "bg-neutral-900 text-neutral-50 border-neutral-900 dark:bg-neutral-100 dark:text-neutral-950 dark:border-neutral-100 font-semibold"
                   : "bg-neutral-50 text-neutral-600 border-neutral-200 hover:bg-neutral-100 hover:text-neutral-900 dark:bg-neutral-900 dark:text-neutral-400 dark:border-neutral-800 dark:hover:bg-neutral-800 dark:hover:text-neutral-200"

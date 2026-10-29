@@ -5,7 +5,7 @@ import { ResearchSearchInput } from "@/components/ResearchSearchInput";
 import { mapVerdictToGroup } from "@/lib/company";
 
 export const metadata: Metadata = {
-  title: "Research Directory — FINN",
+  title: "Research",
   description: "Primary-source corporate analysis, management promises, and financial reality.",
 };
 

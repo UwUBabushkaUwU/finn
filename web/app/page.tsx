@@ -1,3 +1,4 @@
+import { Metadata } from "next";
 import { supabase } from "@/lib/supabase";
 import { Company, Filing, Alert, Price } from "@/lib/types";
 import { parseTimeWindow, getTodayFormattedIST } from "@/lib/time";
@@ -8,6 +9,10 @@ import { AlertsStrip } from "@/components/AlertsStrip";
 import { EventCard } from "@/components/EventCard";
 import { RoutineSection } from "@/components/RoutineSection";
 import { EmptyState } from "@/components/EmptyState";
+
+export const metadata: Metadata = {
+  title: "Brief",
+};
 
 export const revalidate = 60;
 
@@ -158,7 +163,10 @@ export default async function BriefPage({ searchParams }: PageProps) {
               ))}
             </div>
           ) : (
-            <EmptyState message={`Nothing needs your attention in the ${windowLabel}.`} />
+            <EmptyState
+              message={`Nothing needs your attention in the ${windowLabel}.`}
+              suggest7d={activeWindow === "24h"}
+            />
           )}
         </section>
 
@@ -183,7 +191,10 @@ export default async function BriefPage({ searchParams }: PageProps) {
               ))}
             </div>
           ) : (
-            <EmptyState message={`No secondary filings in the ${windowLabel}.`} />
+            <EmptyState
+              message={`No secondary filings in the ${windowLabel}.`}
+              suggest7d={activeWindow === "24h" && needsAttention.length === 0}
+            />
           )}
         </section>
 

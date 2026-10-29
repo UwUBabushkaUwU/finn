@@ -20,14 +20,33 @@ const newsreader = Newsreader({
 });
 
 export const metadata: Metadata = {
-  title: "FINN — Portfolio Brief",
-  description: "Ranked exchange filings and market alerts for public-markets investors.",
+  title: {
+    default: "FINN",
+    template: "%s · FINN",
+  },
+  description: "FINN: what changed in your portfolio, and whether management delivered.",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "FINN",
+  },
+  icons: {
+    icon: [
+      { url: "/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: [
+      { url: "/apple-touch-icon.png", sizes: "180x180", type: "image/png" },
+    ],
+  },
 };
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
+  viewportFit: "cover",
   themeColor: [
     { media: "(prefers-color-scheme: light)", color: "#fcfbf9" },
     { media: "(prefers-color-scheme: dark)", color: "#0c0d0e" },
@@ -46,6 +65,9 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} ${newsreader.variable} h-full antialiased`}
     >
       <head>
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="default" />
         <script
           dangerouslySetInnerHTML={{
             __html: `

@@ -32,7 +32,7 @@ export async function generateMetadata({ params }: PageProps): Promise<Metadata>
   const { ticker: rawTicker } = await params;
   const ticker = decodeURIComponent(rawTicker).toUpperCase();
   return {
-    title: `${ticker} — Primary Research · FINN`,
+    title: ticker,
     description: `Primary-source research, guidance tracking, and financial reality for ${ticker}.`,
   };
 }
