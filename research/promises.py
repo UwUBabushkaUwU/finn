@@ -616,8 +616,17 @@ def extract_claims_from_transcript(doc: dict[str, Any]) -> dict[str, Any]:
     else:
         logger.info("Transcript text_ok=False for %s; fetching raw PDF", period)
         url = doc["url"]
-        resp = requests.get(url, timeout=30)
-        pdf_bytes = resp.content
+        try:
+            resp = requests.get(url, timeout=30)
+            pdf_bytes = resp.content
+        except Exception as e:
+            logger.warning("Failed to fetch raw PDF for %s (%s): %s", period, url, e)
+            return {"guidance": [], "reported": [], "events": []}
+
+        if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
+            logger.warning("Fetched URL is not a valid PDF for %s (%s)", period, url)
+            return {"guidance": [], "reported": [], "events": []}
+
         prompt = (
             template.replace("{period}", period)
             .replace("{event_date}", event_date)
@@ -1783,6 +1792,7 @@ def apply_python_overrides_and_runrates(
             low = None
             high = None
 
+        covers_str = ""
         if low is not None and high is not None and cited_items:
             try:
                 low_f = float(low)
@@ -1875,12 +1885,13 @@ def apply_python_overrides_and_runrates(
             # Non-numeric or range unavailable
             if is_partial and verdict in ["delivered", "missed", "partly"]:
                 orig_v = verdict
+                period_label = f" ({covers_str})" if covers_str else ""
                 if period_ended:
                     verdict = "likely_delivered" if orig_v == "delivered" else "likely_missed"
-                    evidence_text = f"partial period ({covers_str})"
+                    evidence_text = f"partial period{period_label}"
                 else:
                     verdict = "on_track" if orig_v == "delivered" else "behind"
-                    evidence_text = f"partial period ({covers_str})"
+                    evidence_text = f"partial period{period_label}"
                 overrides_count += 1
                 logger.warning("Override [%s]: %s -> %s (partial period: guided %s)", t_id, orig_v, verdict)
 

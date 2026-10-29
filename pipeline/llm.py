@@ -107,11 +107,12 @@ def _execute_gemini_call(
     fast_fail_503: bool = False,
 ) -> dict[str, Any] | list[Any]:
     """Execute Gemini generate_content with JSON mode and rate-limit backoff."""
-    client = get_gemini_client(has_pdf=bool(pdf_bytes))
+    valid_pdf = bool(pdf_bytes and pdf_bytes.startswith(b"%PDF"))
+    client = get_gemini_client(has_pdf=valid_pdf)
     backoff_delays = [10, 30, 60]
 
     contents: list[Any] | str
-    if pdf_bytes:
+    if valid_pdf:
         pdf_part = types.Part.from_bytes(data=pdf_bytes, mime_type="application/pdf")
         contents = [pdf_part, prompt]
     else:

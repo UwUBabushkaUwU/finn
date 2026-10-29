@@ -124,3 +124,4 @@ npm run dev
 * Annual report snapshot parsing processes key management discussion and segment reporting pages, bypassing boilerplate disclosures.
 * Single-user prototype model: RLS permits anonymous read access and threshold updates to `settings` row `id = 1`.
 * Initial research compilation takes 3–4 minutes per company to fetch transcripts, extract quotes, cross-check audited screener tables, and produce verdicts.
+
