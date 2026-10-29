@@ -54,10 +54,10 @@ def get_gemini_client(has_pdf: bool = False) -> genai.Client:
         return _client_pdf
     else:
         if _client_text is None:
-            # HttpOptions timeout is in milliseconds: 60 seconds = 60,000 ms
+            # HttpOptions timeout is in milliseconds: 25 seconds = 25,000 ms
             _client_text = genai.Client(
                 api_key=GEMINI_API_KEY,
-                http_options=types.HttpOptions(timeout=60_000),
+                http_options=types.HttpOptions(timeout=25_000),
             )
         return _client_text
 
@@ -126,19 +126,35 @@ def _execute_gemini_call(
                 ),
             )
             text = (response.text or "").strip()
-            return json.loads(text)
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                cleaned = re.sub(r",\s*([\]}])", r"\1", text)
+                return json.loads(cleaned)
         except Exception as exc:
             err_msg = str(exc).lower()
             is_503 = (
                 "503" in err_msg
                 or "unavailable" in err_msg
                 or "high demand" in err_msg
+                or "504" in err_msg
+                or "deadline" in err_msg
+                or "timeout" in err_msg
+                or "resource_exhausted" in err_msg
+                or "quota" in err_msg
             )
             if fast_fail_503 and is_503:
-                logger.warning("503 UNAVAILABLE on %s: %s (fast-failing to fallback)", model, exc)
+                logger.warning("Fast-failing to fallback on %s: %s", model, exc)
                 raise exc
 
-            # Check for rate-limiting, temporary spikes, or server issues
+            # Check for rate-limiting, temporary spikes, JSON formatting glitches, or server issues
             is_rate_limit = (
                 "429" in err_msg
                 or "resource_exhausted" in err_msg
@@ -149,6 +165,9 @@ def _execute_gemini_call(
                 or "deadline" in err_msg
                 or "timeout" in err_msg
                 or "temporar" in err_msg
+                or "json" in err_msg
+                or "decode" in err_msg
+                or "expecting property" in err_msg
             )
             if is_rate_limit and attempt <= len(backoff_delays):
                 _stats["retries"] += 1

@@ -1,0 +1,36 @@
+You are checking whether an Indian listed company's management delivered on what they committed to. You are given their grouped guidance targets (T ids), figures management reported (R ids), and financial results (N ids). Use ONLY the provided data. Do not calculate new numbers. Do not use outside knowledge.
+
+For EVERY target (T id) in the targets list, pick a verdict and cite the supporting evidence IDs (R and/or N ids). Do not perform revision labeling (revisions are already tracked in T items). You MUST return an entry for every single T id.
+
+Allowed verdicts:
+- delivered / missed / partly: use ONLY if the target period has ended and an N or R figure covers it.
+- on_track / behind: use if the target period is still running and the figures so far point clearly one way.
+- unverifiable: use if no provided figure measures the target. Never guess.
+
+Format for each item in "verdicts":
+{
+  "id": "T..",
+  "verdict": "delivered" | "missed" | "partly" | "on_track" | "behind" | "unverifiable",
+  "evidence": "brief explanation at most 25 words citing the ids you used, e.g. 'FY26 volume was 43M (R5) vs 42-43M guided'",
+  "evidence_ids": ["R5", "N12"]
+}
+
+Then return "read": 2 sentences on what the pattern says about management's guidance (for example: conservative and beaten, consistently optimistic, or quietly walked back), citing T or evidence ids.
+
+Return JSON:
+{
+  "verdicts": [ ... ],
+  "read": "..."
+}
+
+Company: {ticker}
+
+Guidance Targets:
+{targets}
+
+Reported Figures:
+{reported_figures}
+
+Financial Results:
+{financial_results}
+

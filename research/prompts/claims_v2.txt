@@ -1,0 +1,40 @@
+You read the transcript of an Indian listed company's earnings call for {period}. Extract what management committed to (headline business guidance) and what they reported. Use only this transcript. Ignore anything said by analysts except as context for a management answer.
+
+Scope of Guidance:
+- Include ONLY headline business guidance: revenue or revenue growth, margins (EBITDA, EBIT, gross, operating, PAT), profit (PBT, PAT), capex, order book / inflows, product volumes, capacity / utilization, AUM or AUM growth, credit cost, NIM / spread, product launches, and plant commissioning dates.
+- Include stated targets, milestones, ranges, and aspirational goals for these headline metrics (for example: $2 billion revenue milestone, 16% to 17% EBITDA margins, volume targets).
+- STRICTLY EXCLUDE: tax rate (effective tax rate, ETR), dividend policy / payout, accounting changes, working capital policy, one-off/exceptional items, generic pleasantries, and industry outlook.
+
+Reported Figures:
+- Figures stated by management for the period that are operational or non-standard P&L numbers: order book, AUM, volumes, capacity utilization, segment revenue, capex outgo, customer count, credit cost, NIM, etc.
+- ALWAYS capture full-year figures when a Q4 call states them (e.g. FY26 actual revenue, FY26 volumes, FY26 capex).
+- If the company reports or discusses revenue in USD (e.g. IT services like Persistent, exporters), ALWAYS capture USD revenue figures in "reported".
+- Every reported figure MUST specify the "covers" period (e.g. "Q2 FY27", "H1 FY27", "9M FY26", "FY26").
+
+Return JSON:
+{
+ "guidance": [ {
+   "metric": a short lowercase name (e.g. "revenue growth", "ebitda margin", "revenue", "capex", "order book", "aum growth", "credit cost", "nim", "volume", "capacity", "plant commissioning"),
+   "statement": what management committed to, in at most 20 words,
+   "target": {"value": number or null, "low": number or null, "high": number or null, "unit": "%" | "₹ cr" | "$" | "units" | "date" | etc., "direction": "up" | "down" | "flat" | null},
+   "applies_to": the period the target is for, as said or clearly implied, e.g. "FY27", "H2 FY27", "Q3 FY27", "FY28", "March 2027", "FY31",
+   "firmness": "explicit" if it has a number or a date, "soft" if it is directional ("we expect margin improvement"),
+   "update_of_earlier": true if management is restating, raising, cutting or delaying an earlier target, else false,
+   "quote": the exact words from the transcript, copied character for character, at most 40 words,
+   "speaker": name and title as printed,
+   "page": page number
+ } ],
+ "reported": [ {
+   "metric": short lowercase name,
+   "value": number,
+   "unit": "%" | "₹ cr" | "$" | "units" | etc.,
+   "covers": the period the figure covers, e.g. "Q2 FY27", "H1 FY27", "9M FY26", "FY26",
+   "quote": exact words, at most 30 words,
+   "page": page number
+ } ]
+}
+
+If the transcript has no headline guidance or reported operational metrics, return empty lists. Never invent a quote.
+
+Transcript text:
+{transcript_text}
