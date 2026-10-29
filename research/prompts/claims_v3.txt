@@ -1,0 +1,80 @@
+You read the transcript of an Indian listed company's earnings call for {period} (call date: {event_date}). Extract what management committed to or targeted (guidance), what they reported, and operational events. Use only this transcript. Ignore anything said by analysts except as context for a management answer.
+
+Scope of Guidance:
+- Include stated targets, milestones, ranges, and aspirational goals for headline metrics (for example: $2 billion revenue milestone, 16% to 17% EBITDA margins, volume targets, branch targets).
+- Include both explicit numbers and directional/soft commitments ("we expect improvement").
+
+Metric Taxonomy:
+"metric" MUST strictly be one of:
+- revenue: sales, topline, or revenue targets/goals (including multi-billion aspirations like $2B or $5B revenue)
+- revenue_growth: percentage revenue growth targets
+- ebitda_margin: operating/EBITDA margin percentages
+- ebit_margin: EBIT margin percentages or EBIT levels
+- pat: net profit levels
+- pat_growth: net profit growth percentages
+- capex: capital expenditure amounts
+- order_book: order book or order inflow amounts
+- volume: physical unit volumes (e.g. phones, TVs, appliances)
+- capacity: manufacturing capacity or utilization
+- store_count: retail store count, openings, or branch network
+- aum_growth: AUM level or AUM growth percentages
+- credit_cost: credit cost or loan loss provisions
+- nim: net interest margin or spreads
+- milestone: operational project milestones (plant commissioning, commercial production start, factory readiness, product launches, trials, JV/M&A closure) that do not fit numeric metrics
+
+Segment Field:
+- "segment": specific division, segment, or brand (e.g. "telecom", "camera module", "mobile", "lighting", "refrigerators", "washing machines", "Tanishq", "watches", "beYon", "OSAT", "PCB", "gold loan", "MSME", "two-wheeler").
+- If the statement/figure applies to the whole company / consolidated, set "segment": null.
+
+Period Conversion (applies_to):
+"applies_to" MUST be an absolute fiscal period on India's April-March fiscal year (e.g. "Q1 FY27", "Q2 FY27", "H1 FY27", "H2 FY27", "9M FY27", "FY26", "FY27", "FY28", "FY30").
+Convert relative expressions using this call's period {period} and date {event_date}:
+- "this fiscal", "this year", "current fiscal", "by year end" -> convert to the fiscal year of the call (e.g. if call discusses Q1 FY27, Q2 FY27, or Q3 FY27, it means "FY27"; if call discusses Q4 FY26, it refers to "FY27").
+- "next fiscal", "next year" -> convert to the next fiscal year (e.g. "FY28").
+- "next 15 to 18 months" or "next 2-3 years" -> convert to the fiscal period the range ends in (e.g. if call date is Jan 2026, 18 months later is July 2027 -> "Q2 FY28" or "FY28").
+- If a target is for a specific quarter (e.g. "by Q3", "in Q4"), use the absolute quarter: "Q3 FY27", "Q4 FY27", etc.
+
+Exclusions:
+- STRICTLY EXCLUDE: tax rate (effective tax rate, ETR), dividend policy/payout, accounting changes, one-off/exceptional items, generic pleasantries, and macroeconomic/industry outlook.
+
+Return JSON:
+{
+  "guidance": [ {
+    "metric": one of [revenue, revenue_growth, ebitda_margin, ebit_margin, pat, pat_growth, capex, order_book, volume, capacity, store_count, aum_growth, credit_cost, nim, milestone],
+    "segment": string or null,
+    "statement": what management committed to, in at most 20 words,
+    "target": {"value": number or null, "low": number or null, "high": number or null, "unit": "%" | "₹ cr" | "$" | "units" | "stores" | null, "direction": "up" | "down" | "flat" | null},
+    "applies_to": absolute fiscal period (e.g. "FY27", "Q4 FY27", "FY28"),
+    "firmness": "explicit" if it has a number or a date, "soft" if directional,
+    "update_of_earlier": true if management is restating, raising, cutting or delaying an earlier target, else false,
+    "quote": the exact words from the transcript, copied character for character, at most 40 words,
+    "speaker": name and title as printed,
+    "page": page number
+  } ],
+  "reported": [ {
+    "metric": one of [revenue, revenue_growth, ebitda_margin, ebit_margin, pat, pat_growth, capex, order_book, volume, capacity, store_count, aum_growth, credit_cost, nim, milestone],
+    "segment": string or null,
+    "value": number,
+    "unit": "%" | "₹ cr" | "$" | "units" | "stores" | etc.,
+    "covers": absolute period the figure covers, e.g. "Q1 FY27", "Q2 FY27", "H1 FY27", "FY26",
+    "quote": exact words, at most 30 words,
+    "page": page number
+  } ],
+  "events": [ {
+    "segment": string or null,
+    "what": what happened or changed (e.g. "Sanand OSAT facility commenced commercial production", "display facility trials delayed to Q4"), in at most 15 words,
+    "status": "done" | "delayed" | "cancelled" | "in_progress",
+    "when": absolute date or fiscal period (e.g. "March 2026", "Q1 FY27", "December 2025", "FY27"),
+    "quote": exact words, at most 30 words,
+    "page": page number
+  } ]
+}
+
+Notes:
+- "reported" captures segment revenues, volumes, capacity, order book, customer counts, full-year figures on Q4 calls, and USD figures if the company reports in USD.
+- "events" captures things management says have happened or changed: a plant started, commercial production commenced, a JV formed, a product line launched, a target delayed or commissioning postponed.
+- If the transcript has no matching guidance, reported numbers or events, return empty lists. Never invent quotes.
+
+Transcript text:
+{transcript_text}
+

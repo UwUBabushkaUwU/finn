@@ -1,0 +1,40 @@
+You are checking whether an Indian listed company's management delivered on what they committed to. You are given grouped guidance targets (T ids) along with their candidate evidence (reported figures R ids, financial numbers N ids, and operational events E ids).
+
+Use ONLY the provided data. Do not use outside knowledge.
+
+For EVERY target (T id) in the list, pick a verdict and cite the supporting evidence IDs (R, N, or E ids).
+
+Allowed verdicts:
+- delivered: target fully met, or milestone completed on or before deadline.
+- missed: period ended and target was not achieved.
+- partly: partially achieved, or milestone completed late ("late by N months").
+- on_track: period still running and figures/run-rate point to achieving target.
+- behind: period still running and figures/run-rate track below target.
+- revised_down: management announced a delay, postponement or reduction.
+- revised_up: management raised the target.
+- unverifiable: provided figures/events do not measure the target, or deadline passed without an update.
+
+Rules:
+1. For amounts (₹ cr, volumes, stores), compare against the provided run-rate figure if a partial period is covered.
+2. For rates (percentages), compare directly.
+3. For milestones, use candidate events (E ids). If an event shows "done" on or before deadline -> delivered; if "done" after deadline -> partly ("late by N months"); if "delayed" -> revised_down; if deadline passed without update -> unverifiable.
+4. You MUST return a verdict for EVERY single T id listed below.
+
+Return JSON:
+{
+  "verdicts": [
+    {
+      "id": "T..",
+      "verdict": "delivered" | "missed" | "partly" | "on_track" | "behind" | "revised_down" | "revised_up" | "unverifiable",
+      "evidence": "brief explanation at most 25 words citing the evidence ids, e.g. 'FY26 volume was 43M (R5) vs 42-43M guided'",
+      "evidence_ids": ["R5"]
+    }
+  ],
+  "read": "2 sentences on what the pattern says about management's guidance (e.g. conservative and beaten, consistently optimistic, or quietly walked back), citing T or evidence ids."
+}
+
+Company: {ticker}
+
+Targets and Candidate Evidence:
+{targets_with_candidates}
+

@@ -1,13 +1,19 @@
 """Extract, verify, and judge management promises from concall transcripts.
 
-FINN Research Engine - Promises & Guidance Tracker (v2).
-Three steps:
-  1. Extract headline guidance and reported figures using bulk LLM (once per transcript).
-  2. Verify all extracted quotes in Python (no LLM), group targets across quarters,
-     and deterministically label revisions by comparing midpoints.
-  3. Judge delivery using reasoning LLM (once per company), followed by strict
-     Python post-checks that override the model on period mismatch, unit mismatch,
-     or range violations.
+FINN Research Engine - Promises & Guidance Tracker (v3).
+Deterministic Python-first architecture:
+  1. Extract headline guidance, reported operational figures, and operational events
+     using bulk LLM (prompt version claims_v3).
+  2. Verify all extracted quotes in Python (no LLM), group targets across quarters by
+     (metric, segment, applies_to), and deterministically label revisions.
+  3. Pre-filter candidate evidence in Python by (metric, segment). Targets with no
+     candidates are auto-resolved with NO LLM call: 'pending' if period has not ended,
+     or 'unverifiable' if it has.
+  4. Milestones judged against later call events (delivered on time, partly if late,
+     revised_down if delayed, unverifiable if deadline passed without update).
+  5. Partial-period amounts extrapolated to annualized run-rate (sum * period_len / months)
+     for bounds checking. Rates (%) compared directly.
+  6. Strict Python post-checks enforce period completeness and unit matching.
 """
 
 from typing import Any
@@ -28,7 +34,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Ensure utf-8 stdout/stderr on Windows to avoid UnicodeEncodeError for ₹
+# Ensure utf-8 stdout/stderr on Windows to avoid UnicodeEncodeError for ₹ and →
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
@@ -44,6 +50,24 @@ from pipeline.llm import call_json
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("promises")
 
+ALLOWED_METRICS = {
+    "revenue",
+    "revenue_growth",
+    "ebitda_margin",
+    "ebit_margin",
+    "pat",
+    "pat_growth",
+    "capex",
+    "order_book",
+    "volume",
+    "capacity",
+    "store_count",
+    "aum_growth",
+    "credit_cost",
+    "nim",
+    "milestone",
+}
+
 
 def normalize_text(text: str) -> str:
     """Normalize whitespace and quotation characters for reliable matching."""
@@ -51,6 +75,7 @@ def normalize_text(text: str) -> str:
         return ""
     text = re.sub(r"[\u2018\u2019\u201a\u201b\u2032']", "'", text)
     text = re.sub(r'[\u201c\u201d\u201e\u201f\u2033"]', '"', text)
+    text = re.sub(r"[-–—]", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip().lower()
 
@@ -66,9 +91,67 @@ def parse_page_number(page_val: Any) -> int:
     return 1
 
 
+def normalize_segment(seg: Any) -> str | None:
+    """Normalize business segment name or return None if whole company."""
+    if not seg:
+        return None
+    s = str(seg).strip().lower()
+    if s in ["null", "none", "overall", "consolidated", "consol", "company", "total", "entire company"]:
+        return None
+    # Clean common prefixes/suffixes
+    s = re.sub(r"\b(?:division|segment|business)\b", "", s).strip()
+    return s if s else None
+
+
+def normalize_metric(metric: str, hint: str = "") -> str:
+    """Normalize metric name strictly to one of ALLOWED_METRICS."""
+    h = hint.lower()
+    if any(k in h for k in ["$ billion", "billion in annual revenue", "billion revenue", "$2 billion", "$5 billion", "$1 billion"]):
+        return "revenue"
+
+    m = (metric or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if m in ALLOWED_METRICS:
+        return m
+
+    # Heuristic mapping for near matches
+    if "ebitda" in m or "opm" in m or "operating_margin" in m:
+        return "ebitda_margin"
+    if "ebit" in m:
+        return "ebit_margin"
+    if "pat" in m or "net_profit" in m:
+        if "growth" in m:
+            return "pat_growth"
+        return "pat"
+    if "margin" in m:
+        return "ebitda_margin"
+    if "revenue" in m or "sales" in m or "topline" in m or "turnover" in m:
+        if "growth" in m:
+            return "revenue_growth"
+        return "revenue"
+    if "volume" in m or "units" in m:
+        return "volume"
+    if "capacity" in m or "utilization" in m:
+        return "capacity"
+    if "store" in m or "branches" in m:
+        return "store_count"
+    if "capex" in m:
+        return "capex"
+    if "order" in m or "inflow" in m:
+        return "order_book"
+    if "aum" in m:
+        return "aum_growth"
+    if "credit" in m or "loss" in m:
+        return "credit_cost"
+    if "nim" in m or "spread" in m:
+        return "nim"
+    if "milestone" in m or "plant" in m or "launch" in m or "commission" in m or "facility" in m:
+        return "milestone"
+
+    return "milestone"
+
+
 def normalize_unit(unit_str: str | None, hint: str = "") -> str | None:
-    """Normalize unit representation to standard categories: %, ₹ cr, $, units."""
-    # First check unit_str directly if provided
+    """Normalize unit representation to standard categories: %, ₹ cr, $, units, stores."""
     if unit_str:
         u = unit_str.strip().lower()
         if any(k in u for k in ["$", "usd", "dollar"]):
@@ -77,10 +160,11 @@ def normalize_unit(unit_str: str | None, hint: str = "") -> str | None:
             return "%"
         if "₹" in u or re.search(r"\b(?:rs|inr|cr|crore|crores|lakh|lakhs)\b", u):
             return "₹ cr"
-        if re.search(r"\b(?:unit|units|volume|volumes|million|millions|mn|store|stores|nos|ton|tons|capacity|mw|gw|sqft)\b", u):
+        if re.search(r"\b(?:store|stores|branches|outlets)\b", u):
+            return "stores"
+        if re.search(r"\b(?:unit|units|volume|volumes|million|millions|mn|nos|ton|tons|capacity|mw|gw|sqft)\b", u):
             return "units"
 
-    # Next check text hint using regex whole words
     s = hint.lower()
     if any(k in s for k in ["$", "usd", "dollar"]):
         return "$"
@@ -88,7 +172,9 @@ def normalize_unit(unit_str: str | None, hint: str = "") -> str | None:
         return "%"
     if "₹" in s or re.search(r"\b(?:rs|inr|cr|crore|crores|lakh|lakhs)\b", s):
         return "₹ cr"
-    if re.search(r"\b(?:unit|units|volume|volumes|million|millions|mn|store|stores|nos|ton|tons|capacity|mw|gw|sqft)\b", s):
+    if re.search(r"\b(?:store|stores|branches|outlets)\b", s):
+        return "stores"
+    if re.search(r"\b(?:unit|units|volume|volumes|million|millions|mn|nos|ton|tons|capacity|mw|gw|sqft)\b", s):
         return "units"
     return None
 
@@ -98,12 +184,149 @@ def normalize_period(p: str | None) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", str(p or "")).upper()
 
 
-def verify_quote_on_pages(quote: str, pages: list[str], page_num: int) -> bool:
-    """Verify that quote appears on the specified page of the transcript.
+def normalize_applies_to(applies_to_str: str) -> str:
+    """Normalize applies_to period to absolute fiscal periods."""
+    s = (applies_to_str or "").strip()
+    s_lower = s.lower()
+    match_fy = re.search(r"fy\s*(\d{2,4})", s_lower)
+    if match_fy:
+        yr = match_fy.group(1)
+        return f"FY{yr[-2:]}"
+    match_m = re.search(r"mar(?:ch)?\s*(\d{4})", s_lower)
+    if match_m:
+        yr = int(match_m.group(1))
+        return f"FY{str(yr)[-2:]}"
+    match_q = re.search(r"q([1-4])\s*(?:of\s*)?(?:fy)?\s*(\d{2,4})?", s_lower)
+    if match_q:
+        q_num = match_q.group(1)
+        yr_part = match_q.group(2)
+        if yr_part:
+            return f"Q{q_num} FY{yr_part[-2:]}"
+        return f"Q{q_num}"
+    match_h = re.search(r"h([1-2])\s*(?:of\s*)?(?:fy)?\s*(\d{2,4})?", s_lower)
+    if match_h:
+        h_num = match_h.group(1)
+        yr_part = match_h.group(2)
+        if yr_part:
+            return f"H{h_num} FY{yr_part[-2:]}"
+        return f"H{h_num}"
+    return s
+
+
+def parse_fiscal_period(p_str: str) -> tuple[int, int]:
+    """Parse period string into (fy_year, quarter_num 1..4) on India's April-March year.
     
-    Checks exact substring match or sliding window difflib match >= 90%.
-    Also checks nearby pages (page_num - 1, page_num - 2, page_num, etc.) to handle 1-off indexing.
+    Examples:
+      'FY26' -> (2026, 4)
+      'FY27' -> (2027, 4)
+      'Q1 FY27' -> (2027, 1)
+      'Q2 FY27' -> (2027, 2)
+      'H1 FY27' -> (2027, 2)
+      'H2 FY27' -> (2027, 4)
+      '9M FY27' -> (2027, 3)
+      'March 2026' -> (2026, 4)
+      'December 2025' -> (2026, 3)
+      'April 2026' -> (2027, 1)
+      'December 2026' -> (2027, 3)
     """
+    s = (p_str or "").strip().lower()
+    
+    # Quarter pattern
+    m_q = re.search(r"q([1-4])\s*(?:fy\s*(\d{2,4}))?", s)
+    if m_q:
+        q_num = int(m_q.group(1))
+        yr = int(m_q.group(2)) if m_q.group(2) else 27
+        if yr < 100:
+            yr += 2000
+        return (yr, q_num)
+        
+    # Half-year pattern
+    m_h = re.search(r"h([1-2])\s*(?:fy\s*(\d{2,4}))?", s)
+    if m_h:
+        h_num = int(m_h.group(1))
+        q_num = 2 if h_num == 1 else 4
+        yr = int(m_h.group(2)) if m_h.group(2) else 27
+        if yr < 100:
+            yr += 2000
+        return (yr, q_num)
+
+    # 9M pattern
+    m_9m = re.search(r"9m\s*(?:fy\s*(\d{2,4}))?", s)
+    if m_9m:
+        yr = int(m_9m.group(1)) if m_9m.group(1) else 27
+        if yr < 100:
+            yr += 2000
+        return (yr, 3)
+
+    # Full year pattern: FY26, FY27, FY2026
+    m_fy = re.search(r"fy\s*(\d{2,4})", s)
+    if m_fy:
+        yr = int(m_fy.group(1))
+        if yr < 100:
+            yr += 2000
+        return (yr, 4)
+
+    # Calendar month-year patterns
+    month_map = {
+        "jan": (4, 0), "feb": (4, 0), "mar": (4, 0),
+        "apr": (1, 1), "may": (1, 1), "jun": (1, 1),
+        "jul": (2, 1), "aug": (2, 1), "sep": (2, 1),
+        "oct": (3, 1), "nov": (3, 1), "dec": (3, 1),
+    }
+    for m_prefix, (q_idx, fy_add) in month_map.items():
+        if m_prefix in s:
+            m_yr = re.search(r"(\d{4})", s)
+            if m_yr:
+                cal_yr = int(m_yr.group(1))
+                return (cal_yr + fy_add, q_idx)
+            m_short_yr = re.search(r"'?(\d{2})\b", s)
+            if m_short_yr:
+                cal_yr = int(m_short_yr.group(1)) + 2000
+                return (cal_yr + fy_add, q_idx)
+
+    return (2099, 4)
+
+
+def has_period_ended(applies_to_str: str, latest_quarter_str: str = "Q2 FY27") -> bool:
+    """Determine whether applies_to period has concluded relative to latest data."""
+    t_fy, t_q = parse_fiscal_period(applies_to_str)
+    l_fy, l_q = parse_fiscal_period(latest_quarter_str)
+    return (t_fy, t_q) <= (l_fy, l_q)
+
+
+def get_period_length_and_months_covered(applies_to: str, covers: str) -> tuple[int, int]:
+    """Return (target_period_months, evidence_months_covered)."""
+    t_lower = applies_to.lower()
+    c_lower = covers.lower()
+
+    # Target period length
+    if "q" in t_lower:
+        t_months = 3
+    elif "h1" in t_lower or "h2" in t_lower:
+        t_months = 6
+    elif "9m" in t_lower:
+        t_months = 9
+    else:
+        # Full year default
+        t_months = 12
+
+    # Evidence months covered
+    if "q" in c_lower:
+        c_months = 3
+    elif "h1" in c_lower or "h2" in c_lower:
+        c_months = 6
+    elif "9m" in c_lower:
+        c_months = 9
+    elif "fy" in c_lower or "annual" in c_lower or "ttm" in c_lower:
+        c_months = 12
+    else:
+        c_months = 3
+
+    return t_months, min(t_months, c_months)
+
+
+def verify_quote_on_pages(quote: str, pages: list[str], page_num: int) -> bool:
+    """Verify that quote appears on or near the specified page of the transcript."""
     if not quote or not pages:
         return False
 
@@ -111,35 +334,53 @@ def verify_quote_on_pages(quote: str, pages: list[str], page_num: int) -> bool:
     if not norm_quote:
         return False
 
+    q_words = norm_quote.split()
+    if not q_words:
+        return False
+
     candidate_indices = [page_num - 1, page_num - 2, page_num, page_num - 3, page_num + 1]
-    q_len = len(norm_quote)
 
     for idx in candidate_indices:
         if 0 <= idx < len(pages):
-            page_text = normalize_text(pages[idx])
-            if norm_quote in page_text:
+            p_prev = pages[idx - 1] if idx > 0 else ""
+            p_curr = pages[idx]
+            p_next = pages[idx + 1] if idx + 1 < len(pages) else ""
+            full_window = normalize_text(p_prev + " " + p_curr + " " + p_next)
+
+            # 1. Direct substring
+            if norm_quote in full_window:
                 return True
 
-            step = max(1, q_len // 3)
-            for i in range(0, max(1, len(page_text) - q_len + 1), step):
-                window = page_text[i : i + q_len + 20]
-                ratio = difflib.SequenceMatcher(None, norm_quote, window).ratio()
-                if ratio >= 0.90:
+            # 2. Check 4-word sub-slices (handles boundary truncation or prefix/suffix slight differences)
+            if len(q_words) >= 4:
+                prefix = " ".join(q_words[:5])
+                suffix = " ".join(q_words[-5:])
+                mid = " ".join(q_words[1:6])
+                if prefix in full_window or suffix in full_window or mid in full_window:
                     return True
+
+            # 3. Fuzzy search around first 3 words
+            if len(q_words) >= 3:
+                first3 = " ".join(q_words[:3])
+                pos = full_window.find(first3)
+                if pos != -1:
+                    sub = full_window[pos : pos + len(norm_quote) + 20]
+                    if difflib.SequenceMatcher(None, norm_quote, sub).ratio() >= 0.80:
+                        return True
 
     return False
 
 
 def load_claims_prompt_template() -> str:
-    """Load claims extraction prompt from research/prompts/claims_v2.txt."""
-    path = PROJECT_ROOT / "research" / "prompts" / "claims_v2.txt"
+    """Load claims extraction prompt from research/prompts/claims_v3.txt."""
+    path = PROJECT_ROOT / "research" / "prompts" / "claims_v3.txt"
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
 
 def load_verdicts_prompt_template() -> str:
-    """Load verdicts evaluation prompt from research/prompts/verdicts_v2.txt."""
-    path = PROJECT_ROOT / "research" / "prompts" / "verdicts_v2.txt"
+    """Load verdicts evaluation prompt from research/prompts/verdicts_v3.txt."""
+    path = PROJECT_ROOT / "research" / "prompts" / "verdicts_v3.txt"
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
@@ -153,8 +394,9 @@ def format_transcript_with_page_markers(pages: list[str]) -> str:
 
 
 def extract_claims_from_transcript(doc: dict[str, Any]) -> dict[str, Any]:
-    """Step 1: Extract headline guidance and reported figures using bulk task."""
+    """Step 1: Extract guidance, reported figures, and events using bulk task."""
     period = doc.get("period", "Unknown")
+    event_date = str(doc.get("event_date") or "")
     pages = doc.get("pages") or []
     text_ok = doc.get("text_ok", True)
     template = load_claims_prompt_template()
@@ -162,30 +404,38 @@ def extract_claims_from_transcript(doc: dict[str, Any]) -> dict[str, Any]:
     pdf_bytes: bytes | None = None
     if text_ok and pages:
         transcript_text = format_transcript_with_page_markers(pages)
-        prompt = template.replace("{period}", period).replace("{transcript_text}", transcript_text)
+        prompt = (
+            template.replace("{period}", period)
+            .replace("{event_date}", event_date)
+            .replace("{transcript_text}", transcript_text)
+        )
     else:
         logger.info("Transcript text_ok=False for %s; fetching raw PDF", period)
         url = doc["url"]
         resp = requests.get(url, timeout=30)
         pdf_bytes = resp.content
-        prompt = template.replace("{period}", period).replace("{transcript_text}", "[Attached PDF Document]")
+        prompt = (
+            template.replace("{period}", period)
+            .replace("{event_date}", event_date)
+            .replace("{transcript_text}", "[Attached PDF Document]")
+        )
 
     response = call_json(
         task="bulk",
         prompt=prompt,
-        prompt_version="claims_v2",
+        prompt_version="claims_v3",
         pdf_bytes=pdf_bytes,
         use_cache=True,
     )
 
     if not isinstance(response, dict):
         logger.warning("Unexpected non-dict response from LLM: %s", response)
-        return {"guidance": [], "reported": []}
+        return {"guidance": [], "reported": [], "events": []}
 
     guidance = response.get("guidance", [])
     reported = response.get("reported", [])
+    events = response.get("events", [])
 
-    # Normalize covers on reported figures
     clean_reported = []
     if isinstance(reported, list):
         for r in reported:
@@ -195,19 +445,26 @@ def extract_claims_from_transcript(doc: dict[str, Any]) -> dict[str, Any]:
                     r_copy["covers"] = r_copy.get("period", period)
                 clean_reported.append(r_copy)
 
+    clean_events = []
+    if isinstance(events, list):
+        for e in events:
+            if isinstance(e, dict):
+                clean_events.append(dict(e))
+
     return {
         "guidance": guidance if isinstance(guidance, list) else [],
         "reported": clean_reported,
+        "events": clean_events,
     }
 
 
 def verify_extracted_claims(
     doc: dict[str, Any], raw_claims: dict[str, Any]
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int, int]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int, int]:
     """Step 2: Verify every quote against transcript pages in Python.
     
     Excludes non-headline business guidance like tax rate / ETR, dividend policy, accounting.
-    Returns (verified_guidance, verified_reported, total_extracted, total_verified).
+    Returns (verified_guidance, verified_reported, verified_events, total_extracted, total_verified).
     """
     pages = doc.get("pages") or []
     doc_id = doc["id"]
@@ -216,25 +473,29 @@ def verify_extracted_claims(
 
     raw_guidance = raw_claims.get("guidance", [])
     raw_reported = raw_claims.get("reported", [])
+    raw_events = raw_claims.get("events", [])
 
-    total_extracted = len(raw_guidance) + len(raw_reported)
+    total_extracted = len(raw_guidance) + len(raw_reported) + len(raw_events)
     verified_guidance = []
     verified_reported = []
+    verified_events = []
 
     for item in raw_guidance:
-        metric = (item.get("metric") or "").strip().lower()
-        statement = (item.get("statement") or "").lower()
+        statement = item.get("statement") or ""
+        quote = item.get("quote", "")
+        metric = normalize_metric(item.get("metric", ""), statement + " " + quote)
+        segment = normalize_segment(item.get("segment"))
+        statement_lower = statement.lower()
         
         # Hard Python exclusion for tax rates, dividend policy, accounting
-        metric_words = metric.split()
-        stmt_words = statement.split()
+        stmt_words = statement_lower.split()
         if (
-            "tax rate" in metric or "tax rate" in statement
-            or "etr" in metric_words or "etr" in stmt_words
-            or "tax %" in metric or "tax %" in statement
-            or "effective tax" in metric or "effective tax" in statement
-            or "dividend" in metric or "dividend" in statement
-            or "accounting" in metric or "accounting" in statement
+            "tax rate" in statement_lower
+            or "etr" in stmt_words
+            or "tax %" in statement_lower
+            or "effective tax" in statement_lower
+            or "dividend" in statement_lower
+            or "accounting" in statement_lower
         ):
             logger.info("Filtered out non-headline guidance item: %s (%s)", metric, statement[:40])
             continue
@@ -244,6 +505,9 @@ def verify_extracted_claims(
 
         if verify_quote_on_pages(quote, pages, page):
             item_copy = dict(item)
+            item_copy["metric"] = metric
+            item_copy["segment"] = segment
+            item_copy["applies_to"] = normalize_applies_to(item.get("applies_to", ""))
             item_copy["document_id"] = doc_id
             item_copy["period_made"] = period
             item_copy["event_date"] = event_date
@@ -258,16 +522,51 @@ def verify_extracted_claims(
 
         if verify_quote_on_pages(quote, pages, page):
             item_copy = dict(item)
+            item_copy["metric"] = normalize_metric(item.get("metric", ""))
+            item_copy["segment"] = normalize_segment(item.get("segment"))
             item_copy["document_id"] = doc_id
             item_copy["period_reported"] = period
             item_copy["event_date"] = event_date
             item_copy["page"] = page
+            # If Q4 concall reports full year number, normalize covers to full FY
+            if period.startswith("Q4"):
+                fy_match = re.search(r"FY\s*(\d{2,4})", period)
+                if fy_match:
+                    fy_target = f"FY{fy_match.group(1)[-2:]}"
+                    q_lower = quote.lower()
+                    if (
+                        f"for {fy_target.lower()}" in q_lower
+                        or f"as of {fy_target.lower()}" in q_lower
+                        or f"{fy_target.lower()}," in q_lower
+                        or f"{fy_target.lower()} " in q_lower
+                        or "full year" in q_lower
+                        or "full-year" in q_lower
+                        or "whole year" in q_lower
+                        or f"fy'{fy_target[-2:]}" in q_lower
+                        or "as of march" in q_lower
+                    ):
+                        item_copy["covers"] = fy_target
             verified_reported.append(item_copy)
         else:
             logger.info("Dropped unverified reported quote on %s [p.%d]: %s", period, page, quote[:60])
 
-    total_verified = len(verified_guidance) + len(verified_reported)
-    return verified_guidance, verified_reported, total_extracted, total_verified
+    for item in raw_events:
+        quote = item.get("quote", "")
+        page = parse_page_number(item.get("page", 1))
+
+        if verify_quote_on_pages(quote, pages, page):
+            item_copy = dict(item)
+            item_copy["segment"] = normalize_segment(item.get("segment"))
+            item_copy["document_id"] = doc_id
+            item_copy["period_reported"] = period
+            item_copy["event_date"] = event_date
+            item_copy["page"] = page
+            verified_events.append(item_copy)
+        else:
+            logger.info("Dropped unverified event quote on %s [p.%d]: %s", period, page, quote[:60])
+
+    total_verified = len(verified_guidance) + len(verified_reported) + len(verified_events)
+    return verified_guidance, verified_reported, verified_events, total_extracted, total_verified
 
 
 def get_target_midpoint(target: dict[str, Any] | None) -> float | None:
@@ -300,86 +599,22 @@ def get_target_midpoint(target: dict[str, Any] | None) -> float | None:
     return None
 
 
-def normalize_metric(metric: str) -> str:
-    """Normalize metric name for reliable grouping across quarters."""
-    m = (metric or "").strip().lower()
-    if "margin" in m:
-        if "gross" in m:
-            return "gross margin"
-        if "pat" in m or "net" in m:
-            return "pat margin"
-        return "ebitda margin"
-    if "revenue" in m or "sales" in m or "topline" in m or "exports" in m:
-        if "growth" in m:
-            return "revenue growth"
-        if "export" in m:
-            return "export revenue"
-        return "revenue"
-    if "volume" in m:
-        if "mobile" in m or "smartphone" in m:
-            return "smartphone volume"
-        if "refrigerator" in m or "fridge" in m:
-            return "refrigerator volume"
-        return "volume"
-    if "capex" in m:
-        return "capex"
-    if "aum" in m:
-        if "growth" in m:
-            return "aum growth"
-        return "aum"
-    if "credit cost" in m:
-        return "credit cost"
-    if "nim" in m:
-        return "nim"
-    if "order book" in m or "inflow" in m:
-        return "order book"
-    return m
-
-
-def normalize_applies_to(applies_to_str: str) -> str:
-    """Normalize applies_to period (e.g. 'March 2027', 'end of FY27' -> 'FY27')."""
-    s = (applies_to_str or "").strip()
-    s_lower = s.lower()
-    match_fy = re.search(r"fy\s*(\d{2,4})", s_lower)
-    if match_fy:
-        yr = match_fy.group(1)
-        return f"FY{yr[-2:]}"
-    match_m = re.search(r"mar(?:ch)?\s*(\d{4})", s_lower)
-    if match_m:
-        yr = int(match_m.group(1))
-        return f"FY{str(yr)[-2:]}"
-    match_q = re.search(r"q([1-4])\s*(?:of\s*)?(?:fy)?\s*(\d{2,4})?", s_lower)
-    if match_q:
-        q_num = match_q.group(1)
-        yr_part = match_q.group(2)
-        if yr_part:
-            return f"Q{q_num} FY{yr_part[-2:]}"
-        return f"Q{q_num}"
-    return s
-
-
 def group_targets_and_build_timeline(
     guidance_items: list[dict[str, Any]]
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Group guidance by (metric, applies_to) across quarters.
+    """Group guidance by (metric, segment, applies_to) across quarters.
     
-    Computes midpoints and deterministically assigns revision labels:
-      - raised / cut / unchanged
-      - widened (if range only widened around same midpoint)
-      - none (if single statement)
-    
-    Returns (consolidated_targets, timeline_entries).
+    Computes midpoints and deterministically assigns revision labels.
     """
-    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    groups: dict[tuple[str, str | None, str], list[dict[str, Any]]] = {}
 
     for g in guidance_items:
-        raw_metric = g.get("metric", "")
-        raw_applies = g.get("applies_to", "")
-        metric = normalize_metric(raw_metric)
-        applies_to = normalize_applies_to(raw_applies)
+        metric = g.get("metric", "")
+        segment = g.get("segment")
+        applies_to = g.get("applies_to", "")
         if not metric or not applies_to:
             continue
-        key = (metric, applies_to)
+        key = (metric, segment, applies_to)
         if key not in groups:
             groups[key] = []
         groups[key].append(g)
@@ -388,12 +623,10 @@ def group_targets_and_build_timeline(
     timeline_entries: list[dict[str, Any]] = []
     target_idx = 1
 
-    # Sort groups deterministically
-    sorted_group_keys = sorted(groups.keys(), key=lambda k: (k[0], k[1]))
+    sorted_group_keys = sorted(groups.keys(), key=lambda k: (k[0], k[1] or "", k[2]))
 
-    for metric, applies_to in sorted_group_keys:
-        items = groups[(metric, applies_to)]
-        # Sort items by call date / period made
+    for metric, segment, applies_to in sorted_group_keys:
+        items = groups[(metric, segment, applies_to)]
         items_sorted = sorted(items, key=lambda x: str(x.get("event_date") or x.get("period_made") or ""))
         first_item = items_sorted[0]
         latest_item = items_sorted[-1]
@@ -401,7 +634,19 @@ def group_targets_and_build_timeline(
         first_target = first_item.get("target") or {}
         latest_target = latest_item.get("target") or {}
 
-        # Determine revision label by comparing midpoints
+        # Handle bps to % conversion
+        for tgt in [first_target, latest_target]:
+            raw_u = str(tgt.get("unit") or "").lower()
+            if "bps" in raw_u or "basis" in raw_u:
+                tgt["unit"] = "%"
+                if tgt.get("value") is not None:
+                    tgt["value"] = float(tgt["value"]) / 100.0
+                if tgt.get("low") is not None:
+                    tgt["low"] = float(tgt["low"]) / 100.0
+                if tgt.get("high") is not None:
+                    tgt["high"] = float(tgt["high"]) / 100.0
+
+        # Determine revision label
         revision_label = "none"
         if len(items_sorted) > 1:
             m_first = get_target_midpoint(first_target)
@@ -413,7 +658,6 @@ def group_targets_and_build_timeline(
                 elif m_latest < m_first - 1e-4:
                     revision_label = "cut"
                 else:
-                    # Midpoints are equal; check if range only widened
                     f_low, f_high = first_target.get("low"), first_target.get("high")
                     l_low, l_high = latest_target.get("low"), latest_target.get("high")
                     if (f_low is not None and f_high is not None and
@@ -447,9 +691,9 @@ def group_targets_and_build_timeline(
                 val_str = "target updated"
             steps.append(f"{val_str} ({it.get('period_made', '')})")
 
-        evolution_str = f"{applies_to} {metric}: " + " → ".join(steps)
+        seg_prefix = f"[{segment}] " if segment else ""
+        evolution_str = f"{seg_prefix}{applies_to} {metric}: " + " → ".join(steps)
 
-        # Target unit
         target_unit = (
             latest_target.get("unit")
             or first_target.get("unit")
@@ -460,9 +704,11 @@ def group_targets_and_build_timeline(
         t_obj = {
             "id": f"T{target_idx}",
             "metric": metric,
+            "segment": segment,
             "applies_to": applies_to,
             "statement": latest_item.get("statement", first_item.get("statement", "")),
             "first_made_in": first_item.get("period_made", ""),
+            "first_event_date": first_item.get("event_date", ""),
             "latest_period": latest_item.get("period_made", ""),
             "target": latest_target or first_target,
             "earliest_target": first_target,
@@ -475,6 +721,7 @@ def group_targets_and_build_timeline(
 
         timeline_entries.append({
             "metric": metric,
+            "segment": segment,
             "applies_to": applies_to,
             "evolution": evolution_str,
             "items": items_sorted,
@@ -485,14 +732,7 @@ def group_targets_and_build_timeline(
 
 
 def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, Any]]:
-    """Compute financial numbers tagged with explicit covers periods and units.
-    
-    Extracts:
-      - Quarterly P&L rows with QoQ and YoY, covers='Q# FY##'
-      - H1 totals and YoY growth, covers='H1 FY##'
-      - TTM totals, covers='TTM'
-      - Annual P&L rows (last 4 years), covers='FY##'
-    """
+    """Compute financial numbers tagged with explicit metrics, covers periods, and units."""
     tables = financials_row.get("tables", {})
     q_table = tables.get("quarterly_results", {})
     columns = q_table.get("columns", [])
@@ -533,7 +773,26 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
     for row in rows:
         label = row.get("label", "")
         values = row.get("values", [])
-        is_pct = "%" in label or "margin" in label.lower() or "growth" in label.lower()
+        norm_label = label.lower()
+
+        # Map to metric
+        if "sales" in norm_label or "revenue" in norm_label:
+            metric_level = "revenue"
+            metric_growth = "revenue_growth"
+        elif "opm" in norm_label or "operating profit margin" in norm_label or "ebitda margin" in norm_label:
+            metric_level = "ebitda_margin"
+            metric_growth = "ebitda_margin"
+        elif "operating profit" in norm_label or "ebit" in norm_label:
+            metric_level = "ebit_margin"
+            metric_growth = "ebit_margin"
+        elif "net profit" in norm_label or "pat" in norm_label:
+            metric_level = "pat"
+            metric_growth = "pat_growth"
+        else:
+            metric_level = "revenue"
+            metric_growth = "revenue_growth"
+
+        is_pct = "%" in label or "margin" in norm_label
         row_unit = "%" if is_pct else "₹ cr"
 
         for i in range(num_cols):
@@ -542,29 +801,50 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
                 continue
 
             q_cov = q_covers_list[i]
-            parts = [f"{label} {col_labels[i]} = {v_curr:,.1f}{row_unit}"]
-
-            if i > 0:
-                v_prev = values[i - 1] if (i - 1) < len(values) else None
-                if v_prev is not None and v_prev != 0:
-                    qoq = ((v_curr - v_prev) / abs(v_prev)) * 100.0
-                    parts.append(f"{qoq:+.1f}% QoQ vs {q_covers_list[i - 1]}")
-
-            if i >= 4:
-                v_yoy = values[i - 4] if (i - 4) < len(values) else None
-                if v_yoy is not None and v_yoy != 0:
-                    yoy = ((v_curr - v_yoy) / abs(v_yoy)) * 100.0
-                    parts.append(f"{yoy:+.1f}% YoY vs {q_covers_list[i - 4]}")
-
             n_items.append({
                 "id": f"N{counter}",
                 "label": label,
+                "metric": metric_level,
+                "segment": None,
                 "covers": q_cov,
                 "value": v_curr,
                 "unit": row_unit,
-                "description": "; ".join(parts),
+                "description": f"{label} {col_labels[i]} = {v_curr:,.1f}{row_unit}",
             })
             counter += 1
+
+            if not is_pct:
+                if i > 0:
+                    v_prev = values[i - 1] if (i - 1) < len(values) else None
+                    if v_prev is not None and v_prev != 0:
+                        qoq = ((v_curr - v_prev) / abs(v_prev)) * 100.0
+                        n_items.append({
+                            "id": f"N{counter}",
+                            "label": f"{label} QoQ growth",
+                            "metric": metric_growth,
+                            "segment": None,
+                            "covers": q_cov,
+                            "value": round(qoq, 1),
+                            "unit": "%",
+                            "description": f"{label} QoQ growth in {col_labels[i]} = {qoq:+.1f}% vs {q_covers_list[i - 1]}",
+                        })
+                        counter += 1
+
+                if i >= 4:
+                    v_yoy = values[i - 4] if (i - 4) < len(values) else None
+                    if v_yoy is not None and v_yoy != 0:
+                        yoy = ((v_curr - v_yoy) / abs(v_yoy)) * 100.0
+                        n_items.append({
+                            "id": f"N{counter}",
+                            "label": f"{label} YoY growth",
+                            "metric": metric_growth,
+                            "segment": None,
+                            "covers": q_cov,
+                            "value": round(yoy, 1),
+                            "unit": "%",
+                            "description": f"{label} YoY growth in {col_labels[i]} = {yoy:+.1f}% vs {q_covers_list[i - 4]}",
+                        })
+                        counter += 1
 
         # Trailing 4 Quarters (TTM)
         if num_cols >= 8:
@@ -573,19 +853,28 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
             if len(last_4) == 4 and len(prev_4) == 4:
                 sum_last = sum(last_4)
                 sum_prev = sum(prev_4)
-                if sum_prev != 0:
+                n_items.append({
+                    "id": f"N{counter}",
+                    "label": f"{label} (TTM)",
+                    "metric": metric_level,
+                    "segment": None,
+                    "covers": "TTM",
+                    "value": sum_last,
+                    "unit": row_unit,
+                    "description": f"{label} Trailing 4 Quarters ({q_covers_list[num_cols-4]} to {q_covers_list[num_cols-1]}) = {sum_last:,.1f}{row_unit}",
+                })
+                counter += 1
+                if not is_pct and sum_prev != 0:
                     pct = ((sum_last - sum_prev) / abs(sum_prev)) * 100.0
-                    ttm_desc = (
-                        f"{label} Trailing 4 Quarters ({q_covers_list[num_cols-4]} to {q_covers_list[num_cols-1]}) "
-                        f"= {sum_last:,.1f}{row_unit} vs prev 4Q {sum_prev:,.1f} ({pct:+.1f}% YoY)"
-                    )
                     n_items.append({
                         "id": f"N{counter}",
-                        "label": label,
+                        "label": f"{label} TTM YoY growth",
+                        "metric": metric_growth,
+                        "segment": None,
                         "covers": "TTM",
-                        "value": sum_last,
-                        "unit": row_unit,
-                        "description": ttm_desc,
+                        "value": round(pct, 1),
+                        "unit": "%",
+                        "description": f"{label} Trailing 4 Quarters YoY growth = {pct:+.1f}% vs prev 4Q",
                     })
                     counter += 1
 
@@ -593,10 +882,13 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
     for row in rows:
         label = row.get("label", "")
         values = row.get("values", [])
-        is_pct = "%" in label or "margin" in label.lower()
-        if is_pct:
+        norm_label = label.lower()
+        if "%" in label or "margin" in norm_label:
             continue
+        metric_level = "revenue" if ("sales" in norm_label or "revenue" in norm_label) else "pat"
+        metric_growth = "revenue_growth" if metric_level == "revenue" else "pat_growth"
 
+        h1_by_fy: dict[str, float] = {}
         for i in range(1, num_cols):
             cov_curr = q_covers_list[i]
             cov_prev = q_covers_list[i - 1]
@@ -609,9 +901,12 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
                     if v_q1 is not None and v_q2 is not None:
                         h1_val = v_q1 + v_q2
                         h1_cov = f"H1 {fy_curr}"
+                        h1_by_fy[fy_curr] = h1_val
                         n_items.append({
                             "id": f"N{counter}",
-                            "label": label,
+                            "label": f"{label} (H1)",
+                            "metric": metric_level,
+                            "segment": None,
                             "covers": h1_cov,
                             "value": h1_val,
                             "unit": "₹ cr",
@@ -619,17 +914,51 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
                         })
                         counter += 1
 
-    # 3. Annual Profit & Loss (recent 4 years only to keep prompt concise)
+        for fy_str, h1_val in sorted(h1_by_fy.items()):
+            try:
+                yr_int = int(fy_str.replace("FY", ""))
+                prev_fy = f"FY{yr_int - 1:02d}"
+                if prev_fy in h1_by_fy and h1_by_fy[prev_fy] != 0:
+                    prev_h1 = h1_by_fy[prev_fy]
+                    h1_growth = ((h1_val - prev_h1) / abs(prev_h1)) * 100.0
+                    n_items.append({
+                        "id": f"N{counter}",
+                        "label": f"{label} H1 YoY growth",
+                        "metric": metric_growth,
+                        "segment": None,
+                        "covers": f"H1 {fy_str}",
+                        "value": round(h1_growth, 1),
+                        "unit": "%",
+                        "description": f"{label} H1 {fy_str} YoY growth = {h1_growth:+.1f}% vs H1 {prev_fy}",
+                    })
+                    counter += 1
+            except Exception:
+                pass
+
+    # 3. Annual Profit & Loss
     pl_table = tables.get("profit_loss", {})
     pl_columns = pl_table.get("columns", [])
     pl_rows = pl_table.get("rows", [])
-
     recent_pl_indices = [idx for idx in range(max(0, len(pl_columns) - 4), len(pl_columns))]
 
     for row in pl_rows:
         label = row.get("label", "")
         values = row.get("values", [])
-        is_pct = "%" in label or "margin" in label.lower()
+        norm_label = label.lower()
+        if "sales" in norm_label or "revenue" in norm_label:
+            metric_level = "revenue"
+            metric_growth = "revenue_growth"
+        elif "opm" in norm_label or "operating profit margin" in norm_label:
+            metric_level = "ebitda_margin"
+            metric_growth = "ebitda_margin"
+        elif "net profit" in norm_label:
+            metric_level = "pat"
+            metric_growth = "pat_growth"
+        else:
+            metric_level = "revenue"
+            metric_growth = "revenue_growth"
+
+        is_pct = "%" in label or "margin" in norm_label
         row_unit = "%" if is_pct else "₹ cr"
 
         for idx in recent_pl_indices:
@@ -645,6 +974,8 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
                 n_items.append({
                     "id": f"N{counter}",
                     "label": label,
+                    "metric": metric_level,
+                    "segment": None,
                     "covers": fy_cov,
                     "value": val,
                     "unit": row_unit,
@@ -652,51 +983,210 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
                 })
                 counter += 1
 
+                if not is_pct and idx > 0 and (idx - 1) < len(values) and values[idx - 1] is not None and values[idx - 1] != 0:
+                    prev_val = values[idx - 1]
+                    ann_yoy = ((val - prev_val) / abs(prev_val)) * 100.0
+                    n_items.append({
+                        "id": f"N{counter}",
+                        "label": f"{label} YoY growth",
+                        "metric": metric_growth,
+                        "segment": None,
+                        "covers": fy_cov,
+                        "value": round(ann_yoy, 1),
+                        "unit": "%",
+                        "description": f"{label} {fy_cov} YoY growth = {ann_yoy:+.1f}% vs prior year",
+                    })
+                    counter += 1
+
     return n_items
 
 
-def apply_python_overrides(
-    raw_verdicts: list[dict[str, Any]],
-    targets: list[dict[str, Any]],
+def find_candidates_for_target(
+    target: dict[str, Any],
     r_items: list[dict[str, Any]],
     n_items: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], int]:
-    """Execute deterministic Python post-checks that override the judge model:
+    events: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Pick candidate evidence for a target: same metric and segment only.
     
-    1. Missing T ids from judge output become 'not_judged'.
-    2. Invalid evidence IDs overridden to 'unverifiable'.
-    3. Evidence must match target unit (%, ₹ cr, $, units); else 'unverifiable'.
-    4. delivered / missed / partly require evidence whose covers equals applies_to;
-       otherwise downgraded (delivered -> on_track, missed/partly -> behind) with 'partial period'.
-    5. Numeric targets with range: if evidence < low, cannot be on_track or delivered (behind/missed);
-       if > high, cannot be behind or missed.
-    6. Log and count every override.
+    Milestones use events with same segment from later calls.
+    Growth targets use computed growth % items (quarterly YoY, H1, TTM, FY).
+    ebitda_margin uses screener's OPM %.
     """
-    t_by_id = {t["id"]: t for t in targets}
-    r_by_id = {r["id"]: r for r in r_items}
-    n_by_id = {n["id"]: n for n in n_items}
-    valid_ev_ids = set(r_by_id.keys()) | set(n_by_id.keys())
+    t_metric = target.get("metric", "")
+    t_seg = target.get("segment")
+    t_first_date = str(target.get("first_event_date") or "")
+    t_first_period = target.get("first_made_in", "")
 
+    candidates: list[dict[str, Any]] = []
+
+    # Case 1: Milestone target
+    if t_metric == "milestone":
+        t_stmt_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", target.get("statement", "").lower()))
+        stop_words = {"this", "that", "with", "from", "will", "have", "been", "year", "next", "start", "about", "around", "target", "expect", "plan", "facility", "plant", "commercial", "production"}
+        t_keywords = t_stmt_words - stop_words
+
+        for e in events:
+            e_seg = e.get("segment")
+            e_what = (e.get("what") or "").lower()
+            e_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", e_what))
+
+            # Segment match or keyword match
+            seg_match = (t_seg is not None and e_seg == t_seg) or (t_seg is not None and t_seg in e_what)
+            kw_match = bool(t_keywords & e_words)
+
+            if seg_match or (t_seg is None and kw_match):
+                e_date = str(e.get("event_date") or "")
+                e_period = e.get("period_reported", "")
+                if (e_date and t_first_date and e_date > t_first_date) or (e_period != t_first_period):
+                    candidates.append(e)
+        return candidates
+
+    # Case 2: Quantitative target
+    # 2a. Match in reported items (R)
+    for r in r_items:
+        if r.get("metric") == t_metric:
+            r_seg = r.get("segment")
+            seg_match = False
+            if t_seg is None and r_seg is None:
+                seg_match = True
+            elif t_seg is not None and r_seg is not None:
+                t_words = set(t_seg.lower().split())
+                r_words = set(r_seg.lower().split())
+                if t_seg.lower() in r_seg.lower() or r_seg.lower() in t_seg.lower() or bool(t_words & r_words):
+                    seg_match = True
+            if seg_match:
+                candidates.append(r)
+
+    # 2b. Match in financial items (N) - whole company only
+    if t_seg is None:
+        for n in n_items:
+            if n.get("metric") == t_metric:
+                candidates.append(n)
+
+    return candidates
+
+
+def evaluate_milestone(target: dict[str, Any], candidate_events: list[dict[str, Any]], latest_quarter: str) -> dict[str, Any]:
+    """Judge milestone targets with events deterministically:
+    - done by deadline = delivered
+    - done late = partly ('late by N months')
+    - delay announced = revised_down
+    - deadline passed and no update = unverifiable
+    - deadline in future = on_track / pending
+    """
+    t_id = target["id"]
+    statement = target.get("statement", "")
+    applies_to = target.get("applies_to", "")
+    t_fy, t_q = parse_fiscal_period(applies_to)
+    period_ended = has_period_ended(applies_to, latest_quarter)
+
+    # Check for 'done' status
+    done_events = [e for e in candidate_events if e.get("status") == "done"]
+    if done_events:
+        ev = done_events[0]
+        ev_when = ev.get("when", "")
+        ev_fy, ev_q = parse_fiscal_period(ev_when)
+
+        # Check timeliness
+        if (ev_fy, ev_q) <= (t_fy, t_q):
+            return {
+                "id": t_id,
+                "promise": statement,
+                "made_in": target.get("first_made_in", ""),
+                "applies_to": applies_to,
+                "verdict": "delivered",
+                "evidence": f"Milestone delivered on time ({ev.get('what')}, {ev_when}) citing {ev['id']}",
+                "evidence_ids": [ev["id"]],
+                "revision_label": target.get("revision_label", "none"),
+            }
+        else:
+            # Done late
+            q_diff = (ev_fy - t_fy) * 4 + (ev_q - t_q)
+            months_late = max(1, q_diff * 3)
+            return {
+                "id": t_id,
+                "promise": statement,
+                "made_in": target.get("first_made_in", ""),
+                "applies_to": applies_to,
+                "verdict": "partly",
+                "evidence": f"Milestone completed late by {months_late} months ({ev.get('what')}, {ev_when}) citing {ev['id']}",
+                "evidence_ids": [ev["id"]],
+                "revision_label": target.get("revision_label", "none"),
+            }
+
+    # Check for 'delayed' status
+    delayed_events = [e for e in candidate_events if e.get("status") == "delayed"]
+    if delayed_events:
+        ev = delayed_events[0]
+        return {
+            "id": t_id,
+            "promise": statement,
+            "made_in": target.get("first_made_in", ""),
+            "applies_to": applies_to,
+            "verdict": "revised_down",
+            "evidence": f"Delay announced ({ev.get('what')}, {ev.get('when')}) citing {ev['id']}",
+            "evidence_ids": [ev["id"]],
+            "revision_label": "cut",
+        }
+
+    # In progress or no status change
+    if period_ended:
+        return {
+            "id": t_id,
+            "promise": statement,
+            "made_in": target.get("first_made_in", ""),
+            "applies_to": applies_to,
+            "verdict": "unverifiable",
+            "evidence": "deadline passed and no completion update in later calls",
+            "evidence_ids": [e["id"] for e in candidate_events[:1]],
+            "revision_label": target.get("revision_label", "none"),
+        }
+    else:
+        ev_ids = [e["id"] for e in candidate_events[:1]]
+        return {
+            "id": t_id,
+            "promise": statement,
+            "made_in": target.get("first_made_in", ""),
+            "applies_to": applies_to,
+            "verdict": "on_track",
+            "evidence": f"Milestone in progress towards deadline ({applies_to}) citing {ev_ids}",
+            "evidence_ids": ev_ids,
+            "revision_label": target.get("revision_label", "none"),
+        }
+
+
+def apply_python_overrides_and_runrates(
+    raw_verdicts: list[dict[str, Any]],
+    targets: list[dict[str, Any]],
+    candidates_by_tid: dict[str, list[dict[str, Any]]],
+    latest_quarter: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Execute deterministic post-checks that override the model:
+    
+    1. For amounts (₹ cr, units, stores), computes run-rate = sum so far * (period len / months covered)
+       and bounds check uses run-rate, labelled 'at current run-rate'.
+    2. Rates (%) compare directly.
+    3. delivered / missed / partly require evidence whose covers equals applies_to;
+       otherwise downgraded (delivered -> on_track, missed/partly -> behind) with 'partial period'.
+    4. Numeric range sanity check based on run-rate / direct rate.
+    """
     overrides_count = 0
     final_verdicts: list[dict[str, Any]] = []
 
-    # Map raw model verdicts by target id
-    model_v_by_id: dict[str, dict[str, Any]] = {}
-    for v in raw_verdicts:
-        if isinstance(v, dict) and "id" in v:
-            model_v_by_id[v["id"]] = v
+    model_v_by_id = {v["id"]: v for v in raw_verdicts if isinstance(v, dict) and "id" in v}
 
-    # Check every target deterministically
     for t in targets:
         t_id = t["id"]
-        metric = t.get("metric", "")
+        statement = t.get("statement", "")
         applies_to = t.get("applies_to", "")
         applies_to_norm = normalize_period(applies_to)
-        statement = t.get("statement", "")
         revision_label = t.get("revision_label", "none")
+        candidates = candidates_by_tid.get(t_id, [])
+        cand_by_id = {c["id"]: c for c in candidates}
+        period_ended = has_period_ended(applies_to, latest_quarter)
 
         if t_id not in model_v_by_id:
-            logger.warning("Override [%s]: missing in judge output -> not_judged", t_id)
             overrides_count += 1
             final_verdicts.append({
                 "id": t_id,
@@ -718,43 +1208,33 @@ def apply_python_overrides(
             ev_ids = [ev_ids]
 
         # 1. Validate Evidence IDs
-        valid_cites = [eid for eid in ev_ids if eid in valid_ev_ids]
-        if not valid_cites and verdict != "unverifiable":
-            logger.warning("Override [%s]: %s -> unverifiable (no valid evidence IDs)", t_id, verdict)
+        valid_cites = [eid for eid in ev_ids if eid in cand_by_id]
+        if not valid_cites and verdict not in ["unverifiable", "pending"]:
+            logger.warning("Override [%s]: %s -> unverifiable (no valid candidate evidence IDs)", t_id, verdict)
             verdict = "unverifiable"
-            evidence_text += " [Override: unreferenced evidence ID]"
+            evidence_text += " [Override: unreferenced candidate evidence ID]"
             overrides_count += 1
             ev_ids = []
         else:
             ev_ids = valid_cites
 
-        cited_items = []
-        for eid in ev_ids:
-            if eid in r_by_id:
-                cited_items.append(r_by_id[eid])
-            elif eid in n_by_id:
-                cited_items.append(n_by_id[eid])
+        cited_items = [cand_by_id[eid] for eid in ev_ids]
 
         # 2. Unit Matching Check
         target_unit = t.get("unit") or (t.get("target") or {}).get("unit")
-        t_unit_norm = normalize_unit(target_unit, statement + " " + metric)
+        t_unit_norm = normalize_unit(target_unit, statement + " " + t.get("metric", ""))
 
         if t_unit_norm is not None and cited_items:
             has_matching_unit = any(
                 normalize_unit(e.get("unit"), e.get("description", "") or e.get("quote", "")) == t_unit_norm
                 for e in cited_items
             )
-            if not has_matching_unit and verdict != "unverifiable":
+            if not has_matching_unit and verdict not in ["unverifiable", "pending"]:
                 orig_v = verdict
                 verdict = "unverifiable"
                 evidence_text += f" [Override: evidence unit mismatch vs guided {t_unit_norm}]"
                 overrides_count += 1
-                logger.warning(
-                    "Override [%s]: %s -> unverifiable (unit mismatch: guided %s)",
-                    t_id,
-                    orig_v,
-                    t_unit_norm,
-                )
+                logger.warning("Override [%s]: %s -> unverifiable (unit mismatch: guided %s)", t_id, orig_v, t_unit_norm)
 
         # 3. Period Completeness Check (delivered / missed / partly require exact covers == applies_to)
         if verdict in ["delivered", "missed", "partly"]:
@@ -767,76 +1247,64 @@ def apply_python_overrides(
 
             if not has_matching_covers:
                 orig_v = verdict
-                if verdict == "delivered":
-                    verdict = "on_track"
-                else:
-                    verdict = "behind"
+                verdict = "on_track" if verdict == "delivered" else "behind"
                 evidence_text += " (partial period)"
                 overrides_count += 1
-                logger.warning(
-                    "Override [%s]: %s -> %s (partial period: guided %s vs evidence %s)",
-                    t_id,
-                    orig_v,
-                    verdict,
-                    applies_to,
-                    [e.get("covers") for e in cited_items],
-                )
+                logger.warning("Override [%s]: %s -> %s (partial period: guided %s)", t_id, orig_v, verdict)
 
-        # 4. Numeric Range Sanity Check
+        # 4. Numeric Bounds Check (Run-Rate for amounts, Direct for rates)
         t_target = t.get("target") or {}
         low = t_target.get("low")
         high = t_target.get("high")
-        if low is not None and high is not None:
+        if low is None and high is None and t_target.get("value") is not None:
+            try:
+                v_num = float(t_target["value"])
+                low = v_num * 0.95
+                high = v_num * 1.05
+            except (ValueError, TypeError):
+                pass
+
+        if low is not None and high is not None and cited_items:
             try:
                 low_f = float(low)
                 high_f = float(high)
 
-                matching_vals = []
-                for e in cited_items:
-                    e_val = e.get("value")
-                    if e_val is not None:
-                        try:
-                            val_f = float(e_val)
-                            e_unit_norm = normalize_unit(e.get("unit"), e.get("description", "") or e.get("quote", ""))
-                            if e_unit_norm == t_unit_norm:
-                                matching_vals.append((val_f, e.get("covers", "")))
-                        except (ValueError, TypeError):
-                            pass
+                is_amount = t_unit_norm != "%"
+                matching_evs = [
+                    e for e in cited_items
+                    if normalize_unit(e.get("unit"), e.get("description", "") or e.get("quote", "")) == t_unit_norm
+                    and e.get("value") is not None
+                ]
 
-                if matching_vals:
-                    for val_f, cov in matching_vals:
-                        cov_norm = normalize_period(cov)
-                        period_ended = (cov_norm == applies_to_norm)
+                if matching_evs:
+                    for e in matching_evs:
+                        val_f = float(e["value"])
+                        covers_str = e.get("covers", "")
 
-                        if val_f < low_f:
+                        if is_amount:
+                            t_len, cov_len = get_period_length_and_months_covered(applies_to, covers_str)
+                            multiplier = (t_len / cov_len) if cov_len > 0 else 1.0
+                            effective_val = val_f * multiplier
+                            run_rate_label = f" (at current run-rate: {effective_val:,.1f})" if multiplier > 1.0 else ""
+                        else:
+                            effective_val = val_f
+                            run_rate_label = ""
+
+                        if effective_val < low_f:
                             if verdict in ["on_track", "delivered"]:
                                 orig_v = verdict
                                 verdict = "missed" if period_ended else "behind"
-                                evidence_text += f" [Override: evidence {val_f} below guided low {low_f}]"
+                                evidence_text += f" [Override: effective {effective_val:,.1f} below low {low_f:,.1f}{run_rate_label}]"
                                 overrides_count += 1
-                                logger.warning(
-                                    "Override [%s]: %s -> %s (value %s < low %s)",
-                                    t_id,
-                                    orig_v,
-                                    verdict,
-                                    val_f,
-                                    low_f,
-                                )
+                                logger.warning("Override [%s]: %s -> %s (effective %s < low %s)", t_id, orig_v, verdict, effective_val, low_f)
                                 break
-                        elif val_f > high_f:
+                        elif effective_val > high_f:
                             if verdict in ["behind", "missed"]:
                                 orig_v = verdict
                                 verdict = "delivered" if period_ended else "on_track"
-                                evidence_text += f" [Override: evidence {val_f} above guided high {high_f}]"
+                                evidence_text += f" [Override: effective {effective_val:,.1f} above high {high_f:,.1f}{run_rate_label}]"
                                 overrides_count += 1
-                                logger.warning(
-                                    "Override [%s]: %s -> %s (value %s > high %s)",
-                                    t_id,
-                                    orig_v,
-                                    verdict,
-                                    val_f,
-                                    high_f,
-                                )
+                                logger.warning("Override [%s]: %s -> %s (effective %s > high %s)", t_id, orig_v, verdict, effective_val, high_f)
                                 break
             except (ValueError, TypeError):
                 pass
@@ -866,78 +1334,184 @@ def judge_promises_for_company(
     timeline_entries: list[dict[str, Any]],
     reported_items: list[dict[str, Any]],
     n_items: list[dict[str, Any]],
+    events_items: list[dict[str, Any]],
+    latest_quarter: str,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Step 3: Judge delivery using reasoning model and apply Python post-checks."""
-    indexed_r: list[dict[str, Any]] = []
+    """Step 3: Judge delivery with candidate pre-filtering, milestone evaluation, and LLM."""
+    # Index reported items R1...
+    indexed_r = []
     for idx, r in enumerate(reported_items, start=1):
         r_copy = dict(r)
         r_copy["id"] = f"R{idx}"
         indexed_r.append(r_copy)
 
-    # Format targets for prompt
-    t_text_list = []
+    # Index event items E1...
+    indexed_e = []
+    for idx, e in enumerate(events_items, start=1):
+        e_copy = dict(e)
+        e_copy["id"] = f"E{idx}"
+        indexed_e.append(e_copy)
+
+    # Pre-filter candidate evidence per target in Python
+    candidates_by_tid: dict[str, list[dict[str, Any]]] = {}
+    targets_needing_llm: list[dict[str, Any]] = []
+    auto_resolved_verdicts: list[dict[str, Any]] = []
+
     for t in targets:
-        t_text_list.append(
-            f"[{t['id']}] Metric: {t.get('metric')}; Applies to: {t.get('applies_to')}; "
-            f"First made: {t.get('first_made_in')}; Latest status: {t.get('latest_period')}; "
-            f"Revision: {t.get('revision_label')}; Statement: \"{t.get('statement')}\"; "
-            f"Target: {str(t.get('target'))}; Unit: {t.get('unit')}; Evolution: \"{t.get('evolution')}\""
+        t_id = t["id"]
+        cands = find_candidates_for_target(t, indexed_r, n_items, indexed_e)
+        candidates_by_tid[t_id] = cands
+
+        if not cands:
+            # Zero candidates -> Python sets verdict with NO LLM call
+            period_ended = has_period_ended(t.get("applies_to", ""), latest_quarter)
+            if not period_ended:
+                v_status = "pending"
+                ev_str = "period running; no candidate figure or update in later calls yet"
+            else:
+                v_status = "unverifiable"
+                ev_str = "no figure or update in later calls"
+
+            auto_resolved_verdicts.append({
+                "id": t_id,
+                "promise": t.get("statement", ""),
+                "made_in": t.get("first_made_in", ""),
+                "applies_to": t.get("applies_to", ""),
+                "verdict": v_status,
+                "evidence": ev_str,
+                "evidence_ids": [],
+                "revision_label": t.get("revision_label", "none"),
+            })
+        elif t.get("metric") == "milestone":
+            # Milestone targets with candidate events evaluated deterministically
+            mv = evaluate_milestone(t, cands, latest_quarter)
+            auto_resolved_verdicts.append(mv)
+        else:
+            targets_needing_llm.append(t)
+
+    # Run reasoning model ONLY for targets needing LLM evaluation
+    raw_model_verdicts = []
+    read_text = ""
+
+    if targets_needing_llm:
+        t_with_cands_list = []
+        for t in targets_needing_llm:
+            t_id = t["id"]
+            cands = candidates_by_tid[t_id]
+            t_unit = t.get("unit") or ""
+            is_amount = t_unit != "%"
+
+            cand_descs = []
+            for c in cands:
+                c_id = c["id"]
+                c_val = c.get("value")
+                c_cov = c.get("covers") or c.get("period_reported") or ""
+                if is_amount and c_val is not None:
+                    t_len, cov_len = get_period_length_and_months_covered(t.get("applies_to", ""), c_cov)
+                    multiplier = (t_len / cov_len) if cov_len > 0 else 1.0
+                    run_rate = float(c_val) * multiplier
+                    rr_note = f" (run-rate: {run_rate:,.1f}{t_unit} at current run-rate)" if multiplier > 1.0 else ""
+                else:
+                    rr_note = ""
+
+                desc = c.get("description") or c.get("quote") or c.get("what") or ""
+                cand_descs.append(f"    - [{c_id}] ({c_cov}): {desc} {rr_note}")
+
+            t_desc = (
+                f"[{t_id}] Metric: {t.get('metric')}; Segment: {t.get('segment')}; Applies to: {t.get('applies_to')}; "
+                f"Statement: \"{t.get('statement')}\"; Target: {t.get('target')}; Unit: {t_unit}\n"
+                f"  Candidate Evidence:\n" + "\n".join(cand_descs)
+            )
+            t_with_cands_list.append(t_desc)
+
+        prompt_targets = "\n\n".join(t_with_cands_list)
+        template = load_verdicts_prompt_template()
+        prompt = template.replace("{ticker}", ticker).replace("{targets_with_candidates}", prompt_targets)
+
+        response = call_json(
+            task="reasoning",
+            prompt=prompt,
+            prompt_version="verdicts_v3",
+            use_cache=True,
         )
-    targets_text = "\n".join(t_text_list) if t_text_list else "None"
 
-    # Format reported items for prompt
-    r_text_list = []
-    for r in indexed_r:
-        r_text_list.append(
-            f"[{r['id']}] Metric: {r.get('metric')}; Value: {r.get('value')} {r.get('unit', '')}; "
-            f"Covers: {r.get('covers')}; Reported in: {r.get('period_reported')}; Quote: \"{r.get('quote')}\""
-        )
-    reported_text = "\n".join(r_text_list) if r_text_list else "None"
+        if isinstance(response, dict):
+            raw_model_verdicts = response.get("verdicts", [])
+            read_text = response.get("read", "")
 
-    # Format financial numbers for prompt
-    n_text_list = [f"[{n['id']}] {n['description']}; Covers: {n.get('covers')}; Unit: {n.get('unit')}" for n in n_items]
-    financials_text = "\n".join(n_text_list) if n_text_list else "None"
-
-    template = load_verdicts_prompt_template()
-    prompt = (
-        template.replace("{ticker}", ticker)
-        .replace("{targets}", targets_text)
-        .replace("{reported_figures}", reported_text)
-        .replace("{financial_results}", financials_text)
+    # Apply overrides and bounds checks
+    validated_model_verdicts, overrides_count = apply_python_overrides_and_runrates(
+        raw_verdicts=raw_model_verdicts,
+        targets=targets_needing_llm,
+        candidates_by_tid=candidates_by_tid,
+        latest_quarter=latest_quarter,
     )
 
-    response = call_json(
-        task="reasoning",
-        prompt=prompt,
-        prompt_version="verdicts_v2",
-        use_cache=True,
-    )
+    all_verdicts = auto_resolved_verdicts + validated_model_verdicts
+    all_verdicts.sort(key=lambda v: int("".join(c for c in v["id"] if c.isdigit()) or 999))
 
-    if not isinstance(response, dict):
-        logger.warning("Unexpected non-dict response from reasoning model: %s", response)
-        response = {"verdicts": [], "read": ""}
+    # Tally counts
+    counts_dict: dict[str, int] = {
+        "delivered": 0,
+        "missed": 0,
+        "partly": 0,
+        "on_track": 0,
+        "behind": 0,
+        "revised_down": 0,
+        "revised_up": 0,
+        "pending": 0,
+        "unverifiable": 0,
+        "not_judged": 0,
+    }
+    for v in all_verdicts:
+        v_name = v.get("verdict", "unverifiable")
+        if v_name in counts_dict:
+            counts_dict[v_name] += 1
+        else:
+            counts_dict["unverifiable"] += 1
 
-    raw_verdicts = response.get("verdicts", [])
-    read = response.get("read", "")
+    total_promises = len(all_verdicts)
+    counts_parts = [f"{total_promises} promises"]
+    if counts_dict["delivered"]:
+        counts_parts.append(f"{counts_dict['delivered']} delivered")
+    if counts_dict["missed"]:
+        counts_parts.append(f"{counts_dict['missed']} missed")
+    if counts_dict["partly"]:
+        counts_parts.append(f"{counts_dict['partly']} partly")
+    if counts_dict["on_track"]:
+        counts_parts.append(f"{counts_dict['on_track']} on track")
+    if counts_dict["behind"]:
+        counts_parts.append(f"{counts_dict['behind']} behind")
+    if counts_dict["revised_down"]:
+        counts_parts.append(f"{counts_dict['revised_down']} revised down")
+    if counts_dict["revised_up"]:
+        counts_parts.append(f"{counts_dict['revised_up']} revised up")
+    if counts_dict["pending"]:
+        counts_parts.append(f"{counts_dict['pending']} pending")
+    if counts_dict["unverifiable"]:
+        counts_parts.append(f"{counts_dict['unverifiable']} unverifiable")
+    if counts_dict["not_judged"]:
+        counts_parts.append(f"{counts_dict['not_judged']} not judged")
 
-    # Execute deterministic Python post-checks and overrides
-    validated_verdicts, overrides_count = apply_python_overrides(
-        raw_verdicts=raw_verdicts,
-        targets=targets,
-        r_items=indexed_r,
-        n_items=n_items,
-    )
+    counts_line = " · ".join(counts_parts)
 
-    # Gather cited sources for web UI
+    # Revision breakdown
+    rev_dict: dict[str, int] = {"raised": 0, "cut": 0, "widened": 0, "unchanged": 0}
+    for t in targets:
+        r_lbl = t.get("revision_label", "none")
+        if r_lbl in rev_dict:
+            rev_dict[r_lbl] += 1
+
+    # Gather sources for UI
     t_by_id = {t["id"]: t for t in targets}
     r_by_id = {r["id"]: r for r in indexed_r}
+    e_by_id = {e["id"]: e for e in indexed_e}
     cited_sources = []
 
-    for v in validated_verdicts:
+    for v in all_verdicts:
         t_id = v.get("id")
         if t_id in t_by_id:
-            t_obj = t_by_id[t_id]
-            for it in t_obj.get("items", []):
+            for it in t_by_id[t_id].get("items", []):
                 cited_sources.append({
                     "id": t_id,
                     "kind": "guidance",
@@ -959,53 +1533,20 @@ def judge_promises_for_company(
                     "quote": r_src.get("quote"),
                     "page": r_src.get("page"),
                 })
-
-    # Compute verdict counts in Python
-    counts_dict: dict[str, int] = {
-        "delivered": 0,
-        "missed": 0,
-        "partly": 0,
-        "on_track": 0,
-        "behind": 0,
-        "unverifiable": 0,
-        "not_judged": 0,
-    }
-    for v in validated_verdicts:
-        v_name = v.get("verdict", "unverifiable")
-        if v_name in counts_dict:
-            counts_dict[v_name] += 1
-        else:
-            counts_dict["unverifiable"] += 1
-
-    total_promises = len(validated_verdicts)
-    counts_parts = [f"{total_promises} promises"]
-    if counts_dict["delivered"]:
-        counts_parts.append(f"{counts_dict['delivered']} delivered")
-    if counts_dict["missed"]:
-        counts_parts.append(f"{counts_dict['missed']} missed")
-    if counts_dict["partly"]:
-        counts_parts.append(f"{counts_dict['partly']} partly")
-    if counts_dict["on_track"]:
-        counts_parts.append(f"{counts_dict['on_track']} on track")
-    if counts_dict["behind"]:
-        counts_parts.append(f"{counts_dict['behind']} behind")
-    if counts_dict["unverifiable"]:
-        counts_parts.append(f"{counts_dict['unverifiable']} unverifiable")
-    if counts_dict["not_judged"]:
-        counts_parts.append(f"{counts_dict['not_judged']} not judged")
-
-    counts_line = " · ".join(counts_parts)
-
-    # Revision breakdown
-    rev_dict: dict[str, int] = {"raised": 0, "cut": 0, "widened": 0, "unchanged": 0}
-    for t in targets:
-        r_lbl = t.get("revision_label", "none")
-        if r_lbl in rev_dict:
-            rev_dict[r_lbl] += 1
+            elif eid in e_by_id:
+                e_src = e_by_id[eid]
+                cited_sources.append({
+                    "id": eid,
+                    "kind": "event",
+                    "document_id": e_src.get("document_id"),
+                    "period": e_src.get("period_reported"),
+                    "quote": e_src.get("quote"),
+                    "page": e_src.get("page"),
+                })
 
     result_payload = {
-        "verdicts": validated_verdicts,
-        "read": read,
+        "verdicts": all_verdicts,
+        "read": read_text or "Evaluation of management commitments across financial results and operational disclosures.",
         "counts": counts_line,
         "counts_breakdown": counts_dict,
         "revision_breakdown": rev_dict,
@@ -1015,6 +1556,7 @@ def judge_promises_for_company(
             {
                 "id": t["id"],
                 "metric": t["metric"],
+                "segment": t.get("segment"),
                 "applies_to": t["applies_to"],
                 "statement": t["statement"],
                 "revision_label": t["revision_label"],
@@ -1027,35 +1569,39 @@ def judge_promises_for_company(
 
 
 def run_promises_for_ticker(ticker: str) -> dict[str, Any]:
-    """Execute full 3-step promises pipeline for a ticker."""
+    """Execute full promises pipeline (v3) for a ticker."""
     ticker = ticker.strip().upper()
-    logger.info("Running promises evaluation (v2) for %s", ticker)
+    logger.info("Running promises evaluation (v3) for %s", ticker)
 
-    # 1. Fetch transcripts from documents table
+    # 1. Fetch transcripts
     client = get_client()
     res = client.table("documents").select("*").eq("ticker", ticker).eq("kind", "transcript").order("event_date", desc=True).execute()
     transcripts = res.data or []
     if not transcripts:
         raise ValueError(f"No transcripts found for ticker {ticker}. Run research/build_corpus.py first.")
 
-    # 2. Fetch financials table for N-numbers
+    latest_quarter = transcripts[0].get("period", "Q2 FY27")
+
+    # 2. Fetch financials table
     f_res = client.table("financials").select("*").eq("ticker", ticker).execute()
     financials_row = f_res.data[0] if f_res.data else {}
 
     # Step 1 & 2: Extract & Verify per transcript
     all_verified_guidance = []
     all_verified_reported = []
+    all_verified_events = []
     total_quotes_extracted = 0
     total_quotes_verified = 0
 
     for doc in transcripts:
         period = doc.get("period", "")
         raw_claims = extract_claims_from_transcript(doc)
-        v_guidance, v_reported, extracted_cnt, verified_cnt = verify_extracted_claims(doc, raw_claims)
+        v_guidance, v_reported, v_events, extracted_cnt, verified_cnt = verify_extracted_claims(doc, raw_claims)
         total_quotes_extracted += extracted_cnt
         total_quotes_verified += verified_cnt
         all_verified_guidance.extend(v_guidance)
         all_verified_reported.extend(v_reported)
+        all_verified_events.extend(v_events)
         logger.info(
             "%s %s: extracted %d quotes, verified %d (%.0f%%)",
             ticker,
@@ -1073,13 +1619,15 @@ def run_promises_for_ticker(ticker: str) -> dict[str, Any]:
     n_items = compute_financial_numbers(financials_row)
     logger.info("%s: computed %d financial numbers with covers periods", ticker, len(n_items))
 
-    # Step 3: Judge with reasoning model + Python overrides
+    # Step 3: Judge with pre-filtered candidates, run-rates, milestone evaluation
     judgement, cited_sources = judge_promises_for_company(
         ticker=ticker,
         targets=targets,
         timeline_entries=timeline_entries,
         reported_items=all_verified_reported,
         n_items=n_items,
+        events_items=all_verified_events,
+        latest_quarter=latest_quarter,
     )
 
     now_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -1099,6 +1647,7 @@ def run_promises_for_ticker(ticker: str) -> dict[str, Any]:
     timeline_sources = [
         {
             "metric": t["metric"],
+            "segment": t.get("segment"),
             "applies_to": t["applies_to"],
             "quotes": [it.get("quote") for it in t.get("items", [])],
         }
@@ -1143,7 +1692,7 @@ if __name__ == "__main__":
     args = parse_args()
     res = run_promises_for_ticker(args.ticker)
     print("\n" + "=" * 70)
-    print(f"PROMISES EVALUATION (v2): {res['ticker']}")
+    print(f"PROMISES EVALUATION (v3): {res['ticker']}")
     print("=" * 70)
     print(f"Quotes: {res['quotes_extracted']} extracted, {res['quotes_verified']} verified")
     print(f"Targets: {res['unique_targets']} unique targets")
@@ -1152,6 +1701,6 @@ if __name__ == "__main__":
     print(f"Read: {res['read']}")
     print("\nVerdicts:")
     for v in res["verdicts"]:
-        print(f"  [{v.get('id')}] {v.get('promise')} ({v.get('made_in')}): {v.get('verdict')} [Rev: {v.get('revision_label')}]")
+        print(f"  [{v.get('id')}] {v.get('promise')} ({v.get('applies_to')}): {v.get('verdict')} [Rev: {v.get('revision_label')}]")
         print(f"       Evidence: {v.get('evidence')} (IDs: {v.get('evidence_ids')})")
     print("=" * 70 + "\n")

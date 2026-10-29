@@ -12,6 +12,7 @@ import time
 import json
 import hashlib
 import logging
+import re
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -46,18 +47,18 @@ def get_gemini_client(has_pdf: bool = False) -> genai.Client:
         raise ValueError("GEMINI_API_KEY is not set in environment variables.")
     if has_pdf:
         if _client_pdf is None:
-            # HttpOptions timeout is in milliseconds: 90 seconds = 90,000 ms
+            # HttpOptions timeout is in milliseconds: 120 seconds = 120,000 ms
             _client_pdf = genai.Client(
                 api_key=GEMINI_API_KEY,
-                http_options=types.HttpOptions(timeout=90_000),
+                http_options=types.HttpOptions(timeout=120_000),
             )
         return _client_pdf
     else:
         if _client_text is None:
-            # HttpOptions timeout is in milliseconds: 25 seconds = 25,000 ms
+            # HttpOptions timeout is in milliseconds: 120 seconds = 120,000 ms
             _client_text = genai.Client(
                 api_key=GEMINI_API_KEY,
-                http_options=types.HttpOptions(timeout=25_000),
+                http_options=types.HttpOptions(timeout=120_000),
             )
         return _client_text
 
@@ -139,7 +140,7 @@ def _execute_gemini_call(
                 cleaned = re.sub(r",\s*([\]}])", r"\1", text)
                 return json.loads(cleaned)
         except Exception as exc:
-            err_msg = str(exc).lower()
+            err_msg = f"{type(exc).__name__}: {exc}".lower()
             is_503 = (
                 "503" in err_msg
                 or "unavailable" in err_msg
@@ -147,8 +148,12 @@ def _execute_gemini_call(
                 or "504" in err_msg
                 or "deadline" in err_msg
                 or "timeout" in err_msg
+                or "timed out" in err_msg
+                or "readtimeout" in err_msg
+                or "connecttimeout" in err_msg
                 or "resource_exhausted" in err_msg
                 or "quota" in err_msg
+                or "429" in err_msg
             )
             if fast_fail_503 and is_503:
                 logger.warning("Fast-failing to fallback on %s: %s", model, exc)
@@ -164,6 +169,8 @@ def _execute_gemini_call(
                 or "504" in err_msg
                 or "deadline" in err_msg
                 or "timeout" in err_msg
+                or "timed out" in err_msg
+                or "readtimeout" in err_msg
                 or "temporar" in err_msg
                 or "json" in err_msg
                 or "decode" in err_msg
