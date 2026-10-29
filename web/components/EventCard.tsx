@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { GroupedEvent } from "@/lib/types";
 import { formatFilingTime } from "@/lib/time";
 import { formatCategory } from "@/lib/grouping";
@@ -41,9 +42,14 @@ export function EventCard({ event, isCompact = false }: EventCardProps) {
       {/* Header Row 1: Ticker, Company Name (truncate with …), Time */}
       <div className="flex items-baseline justify-between gap-2 min-w-0">
         <div className="flex items-baseline gap-1.5 min-w-0 flex-1">
-          <span className="font-mono font-bold text-sm tracking-tight text-neutral-950 dark:text-neutral-50 shrink-0">
+          <Link
+            href={`/c/${event.ticker}`}
+            onClick={(e) => e.stopPropagation()}
+            className="font-mono font-bold text-sm tracking-tight text-neutral-950 dark:text-neutral-50 hover:underline shrink-0"
+            title={`View ${event.ticker} primary research`}
+          >
             {event.ticker}
-          </span>
+          </Link>
           <span className="text-xs text-neutral-500 dark:text-neutral-400 truncate">
             {event.companyName}
           </span>

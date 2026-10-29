@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { GroupedEvent } from "@/lib/types";
 import { formatFilingTime } from "@/lib/time";
 
@@ -50,9 +51,12 @@ export function RoutineSection({ routineEvents }: RoutineSectionProps) {
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-baseline gap-1.5">
-                    <span className="font-bold text-[11px] text-neutral-900 dark:text-neutral-200">
+                    <Link
+                      href={`/c/${filing.ticker}`}
+                      className="font-bold text-[11px] text-neutral-900 dark:text-neutral-200 hover:underline"
+                    >
                       {filing.ticker}
-                    </span>
+                    </Link>
                     <span className="text-[10px] text-neutral-400 dark:text-neutral-500 truncate max-w-[120px]">
                       {event.companyName}
                     </span>
