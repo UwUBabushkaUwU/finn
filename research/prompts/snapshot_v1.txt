@@ -1,0 +1,9 @@
+From these pages of an Indian listed company's annual report, describe the business. Use only these pages.
+Return JSON: {"what_it_does": at most 35 words,
+ "segments": [{"name": "...", "share_of_revenue": number or null, "page": n}],
+ "customers_and_markets": at most 25 words or null,
+ "pages_used": [...]}
+If a figure isn't printed, use null. No marketing language.
+
+Pages:
+{pages_text}

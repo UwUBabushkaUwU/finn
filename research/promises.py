@@ -1353,6 +1353,78 @@ def evaluate_future_multiyear_target(
         }
 
 
+def format_override_evidence_sentence(
+    target: dict[str, Any],
+    evidence_item: dict[str, Any],
+    effective_val: float,
+    multiplier: float,
+    low_f: float,
+    high_f: float,
+    ev_ids: list[str],
+    t_unit_norm: str | None,
+) -> str:
+    """Format deterministic evidence sentence when Python rule overrides a verdict.
+    
+    Example: 'FY26 revenue growth 25.8% (N173) vs 50% guided'
+    """
+    metric = target.get("metric", "")
+    metric_names = {
+        "revenue_growth": "revenue growth",
+        "pat_growth": "PAT growth",
+        "aum_growth": "AUM growth",
+        "credit_cost": "credit cost",
+        "ebitda_margin": "EBITDA margin",
+        "ebit_margin": "EBIT margin",
+        "revenue": "revenue",
+        "pat": "PAT",
+        "order_book": "order book",
+        "store_count": "store count",
+        "volume": "volume",
+        "capacity": "capacity",
+        "capex": "capex",
+        "nim": "NIM",
+    }
+    metric_name = metric_names.get(metric, metric.replace("_", " "))
+    applies_to = target.get("applies_to", "")
+    covers = evidence_item.get("covers") or applies_to
+    
+    eid_str = ", ".join(ev_ids) if ev_ids else evidence_item.get("id", "")
+    is_pct = t_unit_norm == "%"
+    
+    # Format guided target
+    t_target = target.get("target") or {}
+    guided_unit = "%" if is_pct else (" cr" if t_unit_norm in ["₹ cr", "cr"] else "")
+    if t_target.get("value") is not None:
+        try:
+            gv = float(t_target["value"])
+            val_fmt = f"{gv:,.0f}" if gv >= 1000 else f"{gv:g}"
+            guided_str = f"{val_fmt}{guided_unit}"
+        except (ValueError, TypeError):
+            guided_str = str(t_target["value"])
+    elif t_target.get("low") is not None and t_target.get("high") is not None:
+        try:
+            lv = float(t_target["low"])
+            hv = float(t_target["high"])
+            l_fmt = f"{lv:,.0f}" if lv >= 1000 else f"{lv:g}"
+            h_fmt = f"{hv:,.0f}" if hv >= 1000 else f"{hv:g}"
+            guided_str = f"{l_fmt}–{h_fmt}{guided_unit}"
+        except (ValueError, TypeError):
+            guided_str = f"{low_f:g}–{high_f:g}{guided_unit}"
+    else:
+        l_fmt = f"{low_f:,.0f}" if low_f >= 1000 else f"{low_f:g}"
+        h_fmt = f"{high_f:,.0f}" if high_f >= 1000 else f"{high_f:g}"
+        guided_str = f"{l_fmt}–{h_fmt}{guided_unit}"
+        
+    if is_pct:
+        val_str = f"{effective_val:.1f}%" if round(effective_val, 1) != round(effective_val) else f"{int(effective_val)}%"
+        return f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
+    else:
+        if multiplier > 1.0:
+            return f"{covers} {metric_name} run-rate {effective_val:,.0f} cr ({eid_str}) vs {guided_str} guided"
+        else:
+            return f"{covers} {metric_name} {effective_val:,.0f} cr ({eid_str}) vs {guided_str} guided"
+
+
 def apply_python_overrides_and_runrates(
     raw_verdicts: list[dict[str, Any]],
     targets: list[dict[str, Any]],
@@ -1416,7 +1488,7 @@ def apply_python_overrides_and_runrates(
         if not valid_cites and verdict not in ["unverifiable", "pending"]:
             logger.warning("Override [%s]: %s -> unverifiable (no valid candidate evidence IDs)", t_id, verdict)
             verdict = "unverifiable"
-            evidence_text += " [Override: unreferenced candidate evidence ID]"
+            evidence_text = "unreferenced candidate evidence ID"
             overrides_count += 1
             ev_ids = []
         else:
@@ -1436,7 +1508,7 @@ def apply_python_overrides_and_runrates(
             if not has_matching_unit and verdict not in ["unverifiable", "pending"]:
                 orig_v = verdict
                 verdict = "unverifiable"
-                evidence_text += f" [Override: evidence unit mismatch vs guided {t_unit_norm}]"
+                evidence_text = f"evidence unit mismatch vs guided {t_unit_norm}"
                 overrides_count += 1
                 logger.warning("Override [%s]: %s -> unverifiable (unit mismatch: guided %s)", t_id, orig_v, t_unit_norm)
 
@@ -1513,10 +1585,16 @@ def apply_python_overrides_and_runrates(
                             orig_v = verdict
                             verdict = new_v
                             overrides_count += 1
-                            if is_partial and period_ended:
-                                evidence_text += f" (based on {covers_str}: run-rate {effective_val:,.1f})"
-                            else:
-                                evidence_text += f" [Override: effective {effective_val:,.1f} below low {low_f:,.1f}{run_rate_label}]"
+                            evidence_text = format_override_evidence_sentence(
+                                target=t,
+                                evidence_item=e,
+                                effective_val=effective_val,
+                                multiplier=multiplier,
+                                low_f=low_f,
+                                high_f=high_f,
+                                ev_ids=ev_ids,
+                                t_unit_norm=t_unit_norm,
+                            )
                             logger.warning("Override [%s]: %s -> %s (effective %s < low %s)", t_id, orig_v, verdict, effective_val, low_f)
 
                     elif effective_val > high_f:
@@ -1532,12 +1610,16 @@ def apply_python_overrides_and_runrates(
                             orig_v = verdict
                             verdict = new_v
                             overrides_count += 1
-                            if period_ended and not is_partial:
-                                evidence_text += f" (beat: {effective_val:,.1f} vs target high {high_f:,.1f})"
-                            elif is_partial and period_ended:
-                                evidence_text += f" (based on {covers_str}: run-rate {effective_val:,.1f})"
-                            else:
-                                evidence_text += f" [Override: effective {effective_val:,.1f} above high {high_f:,.1f}{run_rate_label}]"
+                            evidence_text = format_override_evidence_sentence(
+                                target=t,
+                                evidence_item=e,
+                                effective_val=effective_val,
+                                multiplier=multiplier,
+                                low_f=low_f,
+                                high_f=high_f,
+                                ev_ids=ev_ids,
+                                t_unit_norm=t_unit_norm,
+                            )
                             logger.warning("Override [%s]: %s -> %s (effective %s > high %s)", t_id, orig_v, verdict, effective_val, high_f)
 
                     else:
@@ -1551,8 +1633,16 @@ def apply_python_overrides_and_runrates(
                             orig_v = verdict
                             verdict = new_v
                             overrides_count += 1
-                            if is_partial and period_ended:
-                                evidence_text += f" (based on {covers_str}: run-rate {effective_val:,.1f})"
+                            evidence_text = format_override_evidence_sentence(
+                                target=t,
+                                evidence_item=e,
+                                effective_val=effective_val,
+                                multiplier=multiplier,
+                                low_f=low_f,
+                                high_f=high_f,
+                                ev_ids=ev_ids,
+                                t_unit_norm=t_unit_norm,
+                            )
                             logger.warning("Override [%s]: %s -> %s (within range [%s, %s])", t_id, orig_v, verdict, low_f, high_f)
 
             except (ValueError, TypeError):
@@ -1563,10 +1653,10 @@ def apply_python_overrides_and_runrates(
                 orig_v = verdict
                 if period_ended:
                     verdict = "likely_delivered" if orig_v == "delivered" else "likely_missed"
-                    evidence_text += " (partial period)"
+                    evidence_text = f"partial period ({covers_str})"
                 else:
                     verdict = "on_track" if orig_v == "delivered" else "behind"
-                    evidence_text += " (partial period)"
+                    evidence_text = f"partial period ({covers_str})"
                 overrides_count += 1
                 logger.warning("Override [%s]: %s -> %s (partial period: guided %s)", t_id, orig_v, verdict)
 

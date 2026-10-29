@@ -10,9 +10,9 @@ from pathlib import Path
 import sys
 import time
 import json
+import re
 import hashlib
 import logging
-import re
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -47,18 +47,18 @@ def get_gemini_client(has_pdf: bool = False) -> genai.Client:
         raise ValueError("GEMINI_API_KEY is not set in environment variables.")
     if has_pdf:
         if _client_pdf is None:
-            # HttpOptions timeout is in milliseconds: 120 seconds = 120,000 ms
+            # HttpOptions timeout is in milliseconds: 90 seconds = 90,000 ms
             _client_pdf = genai.Client(
                 api_key=GEMINI_API_KEY,
-                http_options=types.HttpOptions(timeout=120_000),
+                http_options=types.HttpOptions(timeout=90_000),
             )
         return _client_pdf
     else:
         if _client_text is None:
-            # HttpOptions timeout is in milliseconds: 120 seconds = 120,000 ms
+            # HttpOptions timeout is in milliseconds: 25 seconds = 25,000 ms
             _client_text = genai.Client(
                 api_key=GEMINI_API_KEY,
-                http_options=types.HttpOptions(timeout=120_000),
+                http_options=types.HttpOptions(timeout=25_000),
             )
         return _client_text
 
