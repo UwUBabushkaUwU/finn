@@ -1,0 +1,11 @@
+You are an equity research analyst summarizing management credibility and track record for {ticker}.
+Here are the final verified verdicts on management's commitments:
+
+{verdicts_summary}
+
+Write a concise 2-3 sentence executive read on management credibility and execution track record. Mention notable delivered, ahead, missed, or pending targets by their IDs (e.g. T2, T5, T6, T12). Use ONLY the verdicts listed above; never contradict them.
+
+Return JSON:
+{
+  "read": "your 2-3 sentence summary here"
+}

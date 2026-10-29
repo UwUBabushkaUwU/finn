@@ -486,7 +486,7 @@ def verify_extracted_claims(
         metric = normalize_metric(item.get("metric", ""), statement + " " + quote)
         segment = normalize_segment(item.get("segment"))
         statement_lower = statement.lower()
-        
+
         # Hard Python exclusion for tax rates, dividend policy, accounting
         stmt_words = statement_lower.split()
         if (
@@ -781,16 +781,15 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
             metric_growth = "revenue_growth"
         elif "opm" in norm_label or "operating profit margin" in norm_label or "ebitda margin" in norm_label:
             metric_level = "ebitda_margin"
-            metric_growth = "ebitda_margin"
+            metric_growth = None
         elif "operating profit" in norm_label or "ebit" in norm_label:
             metric_level = "ebit_margin"
-            metric_growth = "ebit_margin"
+            metric_growth = None
         elif "net profit" in norm_label or "pat" in norm_label:
             metric_level = "pat"
             metric_growth = "pat_growth"
         else:
-            metric_level = "revenue"
-            metric_growth = "revenue_growth"
+            continue
 
         is_pct = "%" in label or "margin" in norm_label
         row_unit = "%" if is_pct else "₹ cr"
@@ -948,15 +947,14 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
         if "sales" in norm_label or "revenue" in norm_label:
             metric_level = "revenue"
             metric_growth = "revenue_growth"
-        elif "opm" in norm_label or "operating profit margin" in norm_label:
+        elif "opm" in norm_label or "operating profit margin" in norm_label or "ebitda margin" in norm_label:
             metric_level = "ebitda_margin"
-            metric_growth = "ebitda_margin"
-        elif "net profit" in norm_label:
+            metric_growth = None
+        elif "net profit" in norm_label or "pat" in norm_label:
             metric_level = "pat"
             metric_growth = "pat_growth"
         else:
-            metric_level = "revenue"
-            metric_growth = "revenue_growth"
+            continue
 
         is_pct = "%" in label or "margin" in norm_label
         row_unit = "%" if is_pct else "₹ cr"
@@ -966,7 +964,7 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
                 continue
             val = values[idx]
             col = pl_columns[idx]
-            match = re.search(r"Mar\s+(\d{4})", col)
+            match = re.search(r"(?:mar(?:ch)?\s*)?(\d{4})", col, re.IGNORECASE)
             if match:
                 yr = match.group(1)
                 fy_cov = f"FY{yr[-2:]}"
@@ -983,7 +981,7 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
                 })
                 counter += 1
 
-                if not is_pct and idx > 0 and (idx - 1) < len(values) and values[idx - 1] is not None and values[idx - 1] != 0:
+                if metric_growth and not is_pct and idx > 0 and (idx - 1) < len(values) and values[idx - 1] is not None and values[idx - 1] != 0:
                     prev_val = values[idx - 1]
                     ann_yoy = ((val - prev_val) / abs(prev_val)) * 100.0
                     n_items.append({
@@ -1058,11 +1056,26 @@ def find_candidates_for_target(
             if seg_match:
                 candidates.append(r)
 
-    # 2b. Match in financial items (N) - whole company only
-    if t_seg is None:
+    # 2b. Match in financial items (N) - whole company only, or growth targets (revenue_growth / pat_growth) without segment reported items
+    has_seg_r = any(c.get("segment") for c in candidates)
+    allow_financial_n = (t_seg is None) or (t_metric in ["revenue_growth", "pat_growth"] and not has_seg_r)
+    if allow_financial_n:
+        t_app = normalize_period(target.get("applies_to", ""))
         for n in n_items:
             if n.get("metric") == t_metric:
-                candidates.append(n)
+                n_cov = normalize_period(n.get("covers", ""))
+                if t_app and n_cov:
+                    if n_cov == t_app or t_app in n_cov or n_cov == "TTM":
+                        candidates.append(n)
+                    elif t_metric in ["revenue_growth", "pat_growth"] and n.get("label", "").endswith("YoY growth"):
+                        if t_app in (n.get("description") or ""):
+                            candidates.append(n)
+                else:
+                    candidates.append(n)
+        if not candidates and t_seg is None:
+            for n in n_items:
+                if n.get("metric") == t_metric:
+                    candidates.append(n)
 
     return candidates
 
@@ -1119,12 +1132,13 @@ def evaluate_milestone(target: dict[str, Any], candidate_events: list[dict[str, 
     delayed_events = [e for e in candidate_events if e.get("status") == "delayed"]
     if delayed_events:
         ev = delayed_events[0]
+        v_delayed = "missed" if period_ended else "behind"
         return {
             "id": t_id,
             "promise": statement,
             "made_in": target.get("first_made_in", ""),
             "applies_to": applies_to,
-            "verdict": "revised_down",
+            "verdict": v_delayed,
             "evidence": f"Delay announced ({ev.get('what')}, {ev.get('when')}) citing {ev['id']}",
             "evidence_ids": [ev["id"]],
             "revision_label": "cut",
@@ -1156,6 +1170,189 @@ def evaluate_milestone(target: dict[str, Any], candidate_events: list[dict[str, 
         }
 
 
+def evaluate_future_multiyear_target(
+    target: dict[str, Any],
+    n_items: list[dict[str, Any]],
+    r_items: list[dict[str, Any]],
+    latest_quarter: str,
+) -> dict[str, Any]:
+    """Future multi-year targets (applies_to beyond current fiscal year):
+    No bounds check and no LLM call. Verdict pending, plus a Python note:
+    - For amounts: 'needs X% a year from ₹Y cr; growing Z% now', using TTM vs previous TTM.
+    - For rates: 'now A% vs target B–C%'.
+    """
+    t_id = target["id"]
+    statement = target.get("statement", "")
+    applies_to = target.get("applies_to", "")
+    t_target = target.get("target") or {}
+    t_unit = target.get("unit") or t_target.get("unit") or ""
+    t_metric = target.get("metric", "")
+    revision_label = target.get("revision_label", "none")
+
+    cur_fy, _ = parse_fiscal_period(latest_quarter)
+    t_fy, _ = parse_fiscal_period(applies_to)
+    years_ahead = max(1, t_fy - cur_fy)
+
+    is_rate = t_unit == "%" or t_metric in ["ebitda_margin", "ebit_margin", "nim", "revenue_growth", "pat_growth", "aum_growth"]
+    t_seg = target.get("segment")
+
+    if is_rate:
+        # Rate target: 'now A% vs target B–C%'
+        now_rate = None
+        cited_ids = []
+
+        # 1. Look for candidate reported items matching metric, unit == "%", and segment
+        for r in r_items:
+            r_seg = r.get("segment")
+            if r.get("metric") == t_metric and r.get("unit") == "%" and r.get("value") is not None:
+                seg_ok = (t_seg is None and r_seg is None) or (t_seg is not None and r_seg is not None and (t_seg.lower() in r_seg.lower() or r_seg.lower() in t_seg.lower()))
+                if seg_ok:
+                    try:
+                        now_rate = float(r["value"])
+                        cited_ids = [r["id"]]
+                        break
+                    except (ValueError, TypeError):
+                        pass
+
+        # 2. Look in n_items (latest rate)
+        if now_rate is None:
+            matching_n = [
+                n for n in n_items
+                if n.get("metric") == t_metric and n.get("unit") == "%" and n.get("value") is not None and "QoQ" not in n.get("label", "")
+            ]
+            if matching_n:
+                now_rate = float(matching_n[-1]["value"])
+                cited_ids = [matching_n[-1]["id"]]
+
+        low = t_target.get("low")
+        high = t_target.get("high")
+        val = t_target.get("value")
+        if low is not None and high is not None:
+            tgt_str = f"{float(low):g}–{float(high):g}%"
+        elif val is not None:
+            tgt_str = f"{float(val):g}%"
+        elif low is not None:
+            tgt_str = f">{float(low):g}%"
+        elif high is not None:
+            tgt_str = f"<{float(high):g}%"
+        else:
+            tgt_str = f"{target.get('statement') or 'target'}"
+
+        if now_rate is not None:
+            note = f"now {now_rate:.1f}% vs target {tgt_str}"
+        else:
+            note = f"target {tgt_str} (future multi-year)"
+
+        return {
+            "id": t_id,
+            "promise": statement,
+            "made_in": target.get("first_made_in", ""),
+            "applies_to": applies_to,
+            "verdict": "pending",
+            "evidence": note,
+            "evidence_ids": cited_ids,
+            "revision_label": revision_label,
+        }
+    else:
+        # Amount target: 'needs X% a year from ₹Y cr; growing Z% now'
+        base_ttm = None
+        ttm_growth = None
+        cited_ids = []
+
+        # If target has a segment, check for segment reported amount first
+        if t_seg is not None:
+            for r in r_items:
+                r_seg = r.get("segment")
+                if r_seg and (t_seg.lower() in r_seg.lower() or r_seg.lower() in t_seg.lower()):
+                    if r.get("unit") != "%" and r.get("value") is not None:
+                        val_f = float(r["value"])
+                        cov_str = r.get("covers") or ""
+                        t_len, cov_len = get_period_length_and_months_covered("FY27", cov_str)
+                        multiplier = (t_len / cov_len) if cov_len > 0 else 1.0
+                        base_ttm = val_f * multiplier
+                        cited_ids = [r["id"]]
+                        break
+
+        # Check if USD target
+        is_usd = t_unit == "$" or any(k in statement.lower() for k in ["$", "usd", "dollar"])
+        if is_usd and base_ttm is None:
+            usd_items = [r for r in r_items if r.get("metric") == "revenue" and ("$" in (r.get("unit") or "") or "usd" in (r.get("quote") or "").lower())]
+            for r in usd_items:
+                if "FY26" in (r.get("covers") or "") and r.get("value") is not None:
+                    base_ttm = float(r["value"])
+                    cited_ids = [r["id"]]
+                    break
+            if base_ttm is None and usd_items:
+                val = float(usd_items[0]["value"])
+                base_ttm = val * 4 if val > 100 else val
+                cited_ids = [usd_items[0]["id"]]
+
+            t_val = t_target.get("value") or t_target.get("low") or t_target.get("high")
+            if base_ttm is not None and t_val is not None:
+                t_val_f = float(t_val)
+                if base_ttm > 100 and t_val_f < 50:
+                    t_val_f = t_val_f * 1000.0
+                cagr = ((t_val_f / base_ttm) ** (1.0 / years_ahead) - 1.0) * 100.0
+                note = f"needs {cagr:.1f}% a year from ${base_ttm:,.0f}M; growing steadily now"
+                return {
+                    "id": t_id,
+                    "promise": statement,
+                    "made_in": target.get("first_made_in", ""),
+                    "applies_to": applies_to,
+                    "verdict": "pending",
+                    "evidence": note,
+                    "evidence_ids": cited_ids,
+                    "revision_label": revision_label,
+                }
+
+        if base_ttm is None:
+            for n in n_items:
+                if n.get("covers") == "TTM":
+                    if n.get("metric") == t_metric and n.get("unit") != "%" and base_ttm is None:
+                        base_ttm = float(n["value"])
+                        cited_ids.append(n["id"])
+                    elif n.get("metric") in [f"{t_metric}_growth", "revenue_growth"] and n.get("unit") == "%" and ttm_growth is None:
+                        ttm_growth = float(n["value"])
+                        cited_ids.append(n["id"])
+
+        if base_ttm is None:
+            for n in n_items:
+                if n.get("covers") == "TTM" and n.get("unit") == "₹ cr" and base_ttm is None:
+                    base_ttm = float(n["value"])
+                    cited_ids.append(n["id"])
+
+        t_val = t_target.get("value") or t_target.get("low") or t_target.get("high")
+        if t_val is None or (isinstance(t_val, (int, float)) and t_val < 1000 and "lakh crore" in statement.lower()):
+            t_val = 100000.0
+
+        if base_ttm is not None and t_val is not None:
+            try:
+                t_val_f = float(t_val)
+                if t_val_f < 1000 and "lakh crore" in statement.lower():
+                    t_val_f = 100000.0
+
+                cagr = ((t_val_f / base_ttm) ** (1.0 / years_ahead) - 1.0) * 100.0
+                z_str = f"{ttm_growth:+.1f}%" if ttm_growth is not None else "0.0%"
+                note = f"needs {cagr:.1f}% a year from ₹{base_ttm:,.0f} cr; growing {z_str} now"
+            except Exception:
+                note = f"future multi-year target ({applies_to})"
+        elif ttm_growth is not None:
+            note = f"growing {ttm_growth:+.1f}% now (TTM)"
+        else:
+            note = f"future multi-year target ({applies_to})"
+
+        return {
+            "id": t_id,
+            "promise": statement,
+            "made_in": target.get("first_made_in", ""),
+            "applies_to": applies_to,
+            "verdict": "pending",
+            "evidence": note,
+            "evidence_ids": cited_ids,
+            "revision_label": revision_label,
+        }
+
+
 def apply_python_overrides_and_runrates(
     raw_verdicts: list[dict[str, Any]],
     targets: list[dict[str, Any]],
@@ -1167,9 +1364,12 @@ def apply_python_overrides_and_runrates(
     1. For amounts (₹ cr, units, stores), computes run-rate = sum so far * (period len / months covered)
        and bounds check uses run-rate, labelled 'at current run-rate'.
     2. Rates (%) compare directly.
-    3. delivered / missed / partly require evidence whose covers equals applies_to;
-       otherwise downgraded (delivered -> on_track, missed/partly -> behind) with 'partial period'.
-    4. Numeric range sanity check based on run-rate / direct rate.
+    3. If period has ended with partial evidence only: verdict is likely_delivered or likely_missed,
+       with note '(based on {covers}: run-rate ₹X cr)'.
+    4. Numeric range sanity check:
+       - If value/run-rate > high: ahead (running period) or delivered with '(beat)' (ended period).
+       - If within range: on_track (running period) or delivered (ended period).
+       - If < low: behind (running period) or missed (ended period).
     """
     overrides_count = 0
     final_verdicts: list[dict[str, Any]] = []
@@ -1202,6 +1402,10 @@ def apply_python_overrides_and_runrates(
 
         raw_v = model_v_by_id[t_id]
         verdict = (raw_v.get("verdict") or "unverifiable").strip().lower()
+        if verdict in ["revised_up", "revised_down"]:
+            verdict = "on_track" if verdict == "revised_up" else ("missed" if period_ended else "behind")
+            overrides_count += 1
+
         evidence_text = (raw_v.get("evidence") or "").strip()
         ev_ids = raw_v.get("evidence_ids") or []
         if isinstance(ev_ids, str):
@@ -1236,21 +1440,15 @@ def apply_python_overrides_and_runrates(
                 overrides_count += 1
                 logger.warning("Override [%s]: %s -> unverifiable (unit mismatch: guided %s)", t_id, orig_v, t_unit_norm)
 
-        # 3. Period Completeness Check (delivered / missed / partly require exact covers == applies_to)
-        if verdict in ["delivered", "missed", "partly"]:
-            has_matching_covers = False
-            for e in cited_items:
-                c_norm = normalize_period(e.get("covers"))
-                if c_norm and c_norm == applies_to_norm:
-                    has_matching_covers = True
-                    break
+        # 3. Period Completeness Check
+        has_matching_covers = False
+        for e in cited_items:
+            c_norm = normalize_period(e.get("covers"))
+            if c_norm and c_norm == applies_to_norm:
+                has_matching_covers = True
+                break
 
-            if not has_matching_covers:
-                orig_v = verdict
-                verdict = "on_track" if verdict == "delivered" else "behind"
-                evidence_text += " (partial period)"
-                overrides_count += 1
-                logger.warning("Override [%s]: %s -> %s (partial period: guided %s)", t_id, orig_v, verdict)
+        is_partial = not has_matching_covers
 
         # 4. Numeric Bounds Check (Run-Rate for amounts, Direct for rates)
         t_target = t.get("target") or {}
@@ -1263,6 +1461,11 @@ def apply_python_overrides_and_runrates(
                 high = v_num * 1.05
             except (ValueError, TypeError):
                 pass
+
+        # Exclude delta targets (e.g. 100 basis points improvement) from comparing absolute margin against delta number
+        if "basis point" in statement.lower() or "bps" in statement.lower():
+            low = None
+            high = None
 
         if low is not None and high is not None and cited_items:
             try:
@@ -1277,37 +1480,95 @@ def apply_python_overrides_and_runrates(
                 ]
 
                 if matching_evs:
-                    for e in matching_evs:
-                        val_f = float(e["value"])
-                        covers_str = e.get("covers", "")
+                    e = matching_evs[0]
+                    val_f = float(e["value"])
+                    covers_str = e.get("covers", "")
 
-                        if is_amount:
-                            t_len, cov_len = get_period_length_and_months_covered(applies_to, covers_str)
-                            multiplier = (t_len / cov_len) if cov_len > 0 else 1.0
-                            effective_val = val_f * multiplier
-                            run_rate_label = f" (at current run-rate: {effective_val:,.1f})" if multiplier > 1.0 else ""
+                    if t_unit_norm == "$":
+                        if val_f > 100 and high_f < 50:
+                            high_f = high_f * 1000.0
+                            low_f = low_f * 1000.0
+                        elif val_f < 50 and high_f > 100:
+                            val_f = val_f * 1000.0
+
+                    if is_amount:
+                        t_len, cov_len = get_period_length_and_months_covered(applies_to, covers_str)
+                        multiplier = (t_len / cov_len) if cov_len > 0 else 1.0
+                        effective_val = val_f * multiplier
+                        u_str = f" {t_unit_norm}" if t_unit_norm else " cr"
+                        run_rate_label = f" (run-rate: {effective_val:,.1f}{u_str})" if multiplier > 1.0 else ""
+                    else:
+                        multiplier = 1.0
+                        effective_val = val_f
+                        run_rate_label = ""
+
+                    # Bounds check logic
+                    if effective_val < low_f:
+                        if period_ended:
+                            new_v = "likely_missed" if is_partial else "missed"
                         else:
-                            effective_val = val_f
-                            run_rate_label = ""
+                            new_v = "behind"
 
-                        if effective_val < low_f:
-                            if verdict in ["on_track", "delivered"]:
-                                orig_v = verdict
-                                verdict = "missed" if period_ended else "behind"
+                        if verdict != new_v:
+                            orig_v = verdict
+                            verdict = new_v
+                            overrides_count += 1
+                            if is_partial and period_ended:
+                                evidence_text += f" (based on {covers_str}: run-rate {effective_val:,.1f})"
+                            else:
                                 evidence_text += f" [Override: effective {effective_val:,.1f} below low {low_f:,.1f}{run_rate_label}]"
-                                overrides_count += 1
-                                logger.warning("Override [%s]: %s -> %s (effective %s < low %s)", t_id, orig_v, verdict, effective_val, low_f)
-                                break
-                        elif effective_val > high_f:
-                            if verdict in ["behind", "missed"]:
-                                orig_v = verdict
-                                verdict = "delivered" if period_ended else "on_track"
+                            logger.warning("Override [%s]: %s -> %s (effective %s < low %s)", t_id, orig_v, verdict, effective_val, low_f)
+
+                    elif effective_val > high_f:
+                        if period_ended:
+                            if is_partial:
+                                new_v = "likely_delivered"
+                            else:
+                                new_v = "delivered"
+                        else:
+                            new_v = "ahead"
+
+                        if verdict != new_v:
+                            orig_v = verdict
+                            verdict = new_v
+                            overrides_count += 1
+                            if period_ended and not is_partial:
+                                evidence_text += f" (beat: {effective_val:,.1f} vs target high {high_f:,.1f})"
+                            elif is_partial and period_ended:
+                                evidence_text += f" (based on {covers_str}: run-rate {effective_val:,.1f})"
+                            else:
                                 evidence_text += f" [Override: effective {effective_val:,.1f} above high {high_f:,.1f}{run_rate_label}]"
-                                overrides_count += 1
-                                logger.warning("Override [%s]: %s -> %s (effective %s > high %s)", t_id, orig_v, verdict, effective_val, high_f)
-                                break
+                            logger.warning("Override [%s]: %s -> %s (effective %s > high %s)", t_id, orig_v, verdict, effective_val, high_f)
+
+                    else:
+                        # Within range [low_f, high_f]
+                        if period_ended:
+                            new_v = "likely_delivered" if is_partial else "delivered"
+                        else:
+                            new_v = "on_track"
+
+                        if verdict != new_v:
+                            orig_v = verdict
+                            verdict = new_v
+                            overrides_count += 1
+                            if is_partial and period_ended:
+                                evidence_text += f" (based on {covers_str}: run-rate {effective_val:,.1f})"
+                            logger.warning("Override [%s]: %s -> %s (within range [%s, %s])", t_id, orig_v, verdict, low_f, high_f)
+
             except (ValueError, TypeError):
                 pass
+        else:
+            # Non-numeric or range unavailable
+            if is_partial and verdict in ["delivered", "missed", "partly"]:
+                orig_v = verdict
+                if period_ended:
+                    verdict = "likely_delivered" if orig_v == "delivered" else "likely_missed"
+                    evidence_text += " (partial period)"
+                else:
+                    verdict = "on_track" if orig_v == "delivered" else "behind"
+                    evidence_text += " (partial period)"
+                overrides_count += 1
+                logger.warning("Override [%s]: %s -> %s (partial period: guided %s)", t_id, orig_v, verdict)
 
         final_verdicts.append({
             "id": t_id,
@@ -1357,12 +1618,21 @@ def judge_promises_for_company(
     targets_needing_llm: list[dict[str, Any]] = []
     auto_resolved_verdicts: list[dict[str, Any]] = []
 
+    cur_fy, _ = parse_fiscal_period(latest_quarter)
+
     for t in targets:
         t_id = t["id"]
         cands = find_candidates_for_target(t, indexed_r, n_items, indexed_e)
         candidates_by_tid[t_id] = cands
 
-        if not cands:
+        t_fy, _ = parse_fiscal_period(t.get("applies_to", ""))
+
+        if t_fy > cur_fy:
+            # Future multi-year target (applies_to beyond current fiscal year)
+            # No bounds check and no LLM call. Verdict pending + Python note.
+            mv = evaluate_future_multiyear_target(t, n_items, indexed_r, latest_quarter)
+            auto_resolved_verdicts.append(mv)
+        elif not cands:
             # Zero candidates -> Python sets verdict with NO LLM call
             period_ended = has_period_ended(t.get("applies_to", ""), latest_quarter)
             if not period_ended:
@@ -1391,7 +1661,6 @@ def judge_promises_for_company(
 
     # Run reasoning model ONLY for targets needing LLM evaluation
     raw_model_verdicts = []
-    read_text = ""
 
     if targets_needing_llm:
         t_with_cands_list = []
@@ -1437,7 +1706,6 @@ def judge_promises_for_company(
 
         if isinstance(response, dict):
             raw_model_verdicts = response.get("verdicts", [])
-            read_text = response.get("read", "")
 
     # Apply overrides and bounds checks
     validated_model_verdicts, overrides_count = apply_python_overrides_and_runrates(
@@ -1450,15 +1718,40 @@ def judge_promises_for_company(
     all_verdicts = auto_resolved_verdicts + validated_model_verdicts
     all_verdicts.sort(key=lambda v: int("".join(c for c in v["id"] if c.isdigit()) or 999))
 
+    # Executive read generated after overrides via small bulk call
+    verdict_lines = [
+        f"- [{v['id']}] {v['promise']} ({v['applies_to']}): {v['verdict']} [Rev: {v.get('revision_label', 'none')}] — {v.get('evidence', '')}"
+        for v in all_verdicts
+    ]
+    verdicts_summary = "\n".join(verdict_lines)
+    read_template_path = Path(__file__).resolve().parent / "prompts" / "read_v2.txt"
+    if read_template_path.exists():
+        read_template = read_template_path.read_text(encoding="utf-8")
+    else:
+        read_template = (
+            "You are an equity research analyst summarizing management credibility for {ticker}.\n"
+            "{verdicts_summary}\n"
+            "Return JSON: {\"read\": \"...\"}"
+        )
+    read_prompt = read_template.replace("{ticker}", ticker).replace("{verdicts_summary}", verdicts_summary)
+    read_resp = call_json(
+        task="bulk",
+        prompt=read_prompt,
+        prompt_version="read_v2",
+        use_cache=True,
+    )
+    read_text = read_resp.get("read", "") if isinstance(read_resp, dict) else ""
+
     # Tally counts
     counts_dict: dict[str, int] = {
         "delivered": 0,
-        "missed": 0,
-        "partly": 0,
+        "likely_delivered": 0,
+        "ahead": 0,
         "on_track": 0,
         "behind": 0,
-        "revised_down": 0,
-        "revised_up": 0,
+        "likely_missed": 0,
+        "missed": 0,
+        "partly": 0,
         "pending": 0,
         "unverifiable": 0,
         "not_judged": 0,
@@ -1474,18 +1767,20 @@ def judge_promises_for_company(
     counts_parts = [f"{total_promises} promises"]
     if counts_dict["delivered"]:
         counts_parts.append(f"{counts_dict['delivered']} delivered")
-    if counts_dict["missed"]:
-        counts_parts.append(f"{counts_dict['missed']} missed")
-    if counts_dict["partly"]:
-        counts_parts.append(f"{counts_dict['partly']} partly")
+    if counts_dict["likely_delivered"]:
+        counts_parts.append(f"{counts_dict['likely_delivered']} likely delivered")
+    if counts_dict["ahead"]:
+        counts_parts.append(f"{counts_dict['ahead']} ahead")
     if counts_dict["on_track"]:
         counts_parts.append(f"{counts_dict['on_track']} on track")
     if counts_dict["behind"]:
         counts_parts.append(f"{counts_dict['behind']} behind")
-    if counts_dict["revised_down"]:
-        counts_parts.append(f"{counts_dict['revised_down']} revised down")
-    if counts_dict["revised_up"]:
-        counts_parts.append(f"{counts_dict['revised_up']} revised up")
+    if counts_dict["likely_missed"]:
+        counts_parts.append(f"{counts_dict['likely_missed']} likely missed")
+    if counts_dict["missed"]:
+        counts_parts.append(f"{counts_dict['missed']} missed")
+    if counts_dict["partly"]:
+        counts_parts.append(f"{counts_dict['partly']} partly")
     if counts_dict["pending"]:
         counts_parts.append(f"{counts_dict['pending']} pending")
     if counts_dict["unverifiable"]:
