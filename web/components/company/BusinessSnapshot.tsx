@@ -88,7 +88,7 @@ export function BusinessSnapshot({ snapshot, meta }: BusinessSnapshotProps) {
           {/* Segments legend */}
           <div className="grid grid-cols-1 gap-1.5 pt-0.5">
             {segments.map((seg, idx) => {
-              const share = seg.share_of_revenue != null ? `${seg.share_of_revenue}%` : "—";
+              const share = seg.share_of_revenue != null ? `${Math.round(seg.share_of_revenue)}%` : "—";
               const colorClass = segmentColors[idx % segmentColors.length].split(" ")[0];
               return (
                 <div

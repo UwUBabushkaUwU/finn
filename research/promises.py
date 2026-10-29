@@ -287,6 +287,210 @@ def parse_fiscal_period(p_str: str) -> tuple[int, int]:
     return (2099, 4)
 
 
+def get_period_quarter_range(p_str: str) -> tuple[int, int] | None:
+    """Parse period string into (start_q_index, end_q_index) where index = fy * 4 + q."""
+    s = (p_str or "").strip().lower()
+    if not s:
+        return None
+
+    # Multi-year pattern: FY26-FY28, FY26–FY28
+    m_my = re.search(r"fy\s*(\d{2,4})\s*[-–]\s*fy?\s*(\d{2,4})", s)
+    if m_my:
+        y1 = int(m_my.group(1))
+        y2 = int(m_my.group(2))
+        y1 = y1 + 2000 if y1 < 100 else y1
+        y2 = y2 + 2000 if y2 < 100 else y2
+        return (y1 * 4 + 1, y2 * 4 + 4)
+
+    # Quarter pattern
+    m_q = re.search(r"q([1-4])\s*(?:fy\s*(\d{2,4}))?", s)
+    if m_q:
+        q = int(m_q.group(1))
+        yr = int(m_q.group(2)) if m_q.group(2) else 27
+        yr = yr + 2000 if yr < 100 else yr
+        idx = yr * 4 + q
+        return (idx, idx)
+
+    # Half year pattern
+    m_h = re.search(r"h([1-2])\s*(?:fy\s*(\d{2,4}))?", s)
+    if m_h:
+        h = int(m_h.group(1))
+        yr = int(m_h.group(2)) if m_h.group(2) else 27
+        yr = yr + 2000 if yr < 100 else yr
+        if h == 1:
+            return (yr * 4 + 1, yr * 4 + 2)
+        else:
+            return (yr * 4 + 3, yr * 4 + 4)
+
+    # 9M pattern
+    m_9m = re.search(r"9m\s*(?:fy\s*(\d{2,4}))?", s)
+    if m_9m:
+        yr = int(m_9m.group(1)) if m_9m.group(1) else 27
+        yr = yr + 2000 if yr < 100 else yr
+        return (yr * 4 + 1, yr * 4 + 3)
+
+    # Full year pattern: FY26, FY27, FY2026
+    m_fy = re.search(r"fy\s*(\d{2,4})", s)
+    if m_fy:
+        yr = int(m_fy.group(1))
+        yr = yr + 2000 if yr < 100 else yr
+        return (yr * 4 + 1, yr * 4 + 4)
+
+    # Month calendar patterns
+    month_map = {
+        "jan": (4, 0), "january": (4, 0),
+        "feb": (4, 0), "february": (4, 0),
+        "mar": (4, 0), "march": (4, 0),
+        "apr": (1, 1), "april": (1, 1),
+        "may": (1, 1),
+        "jun": (1, 1), "june": (1, 1),
+        "jul": (2, 1), "july": (2, 1),
+        "aug": (2, 1), "august": (2, 1),
+        "sep": (2, 1), "sept": (2, 1), "september": (2, 1),
+        "oct": (3, 1), "october": (3, 1),
+        "nov": (3, 1), "november": (3, 1),
+        "dec": (3, 1), "december": (3, 1),
+    }
+    for m_name, (q_num, yr_offset) in month_map.items():
+        if m_name in s:
+            yr_match = re.search(r"\b(20\d{2})\b", s)
+            if yr_match:
+                cal_yr = int(yr_match.group(1))
+                fy_yr = cal_yr + yr_offset
+                idx = fy_yr * 4 + q_num
+                return (idx, idx)
+
+    return None
+
+
+def period_falls_inside(covers_str: str, applies_to_str: str) -> bool:
+    """Check whether evidence covers period falls strictly inside target's applies_to."""
+    if not covers_str or not applies_to_str:
+        return False
+    cov_r = get_period_quarter_range(covers_str)
+    app_r = get_period_quarter_range(applies_to_str)
+    if not cov_r or not app_r:
+        return normalize_period(covers_str) == normalize_period(applies_to_str)
+    return cov_r[0] >= app_r[0] and cov_r[1] <= app_r[1]
+
+
+def format_indian_number(val: Any) -> str:
+    """Format number with Indian digit grouping (e.g. 1,600 or 12,34,567)."""
+    if val is None:
+        return ""
+    try:
+        val_f = float(str(val).replace(",", "").replace("₹", "").replace("$", "").strip())
+    except (ValueError, TypeError):
+        return str(val)
+
+    is_negative = val_f < 0
+    val_f = abs(val_f)
+
+    if val_f == int(val_f):
+        s = str(int(val_f))
+        dec = ""
+    else:
+        s_float = f"{val_f:.1f}"
+        parts = s_float.split(".")
+        s = parts[0]
+        dec = "." + parts[1] if len(parts) > 1 else ""
+
+    if len(s) <= 3:
+        res = s
+    else:
+        last3 = s[-3:]
+        remaining = s[:-3]
+        groups = []
+        while len(remaining) > 2:
+            groups.insert(0, remaining[-2:])
+            remaining = remaining[:-2]
+        if remaining:
+            groups.insert(0, remaining)
+        res = ",".join(groups) + "," + last3
+
+    full = f"-{res}{dec}" if is_negative else f"{res}{dec}"
+    return full
+
+
+def format_money(val: Any, unit: str = "cr") -> str:
+    """Format single money value with ₹ placed strictly before the number."""
+    formatted = format_indian_number(val)
+    if not formatted:
+        return ""
+    u = f" {unit}".rstrip() if unit else ""
+    return f"₹{formatted}{u}"
+
+
+def format_money_range(low: Any, high: Any, unit: str = "cr") -> str:
+    """Format money range with ₹ before the first number and unit at the end."""
+    f_low = format_indian_number(low)
+    f_high = format_indian_number(high)
+    u = f" {unit}".rstrip() if unit else ""
+    return f"₹{f_low}–{f_high}{u}"
+
+
+MILESTONE_STOPWORDS = {
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with",
+    "by", "from", "up", "about", "into", "over", "after", "is", "am", "are", "was",
+    "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will",
+    "would", "shall", "should", "may", "might", "must", "can", "could", "this", "that",
+    "these", "those", "it", "its", "we", "our", "us", "they", "their", "them", "he",
+    "she", "him", "her", "i", "my", "me", "there", "their", "then", "so", "as", "than",
+    "target", "expect", "expected", "plan", "planned", "guidance", "guide", "guided",
+    "estimated", "estimate", "around", "nearly", "approximately", "achieve", "reach",
+    "deliver", "continue", "start", "complete", "completed", "completion", "milestone",
+    "status", "update", "likely", "unlikely", "going", "come", "next", "prior",
+    "previous", "current", "overall", "total", "company", "management", "said", "call",
+    "quarter", "annual", "report", "results", "growth", "numbers", "work", "focus",
+    "january", "february", "march", "april", "may", "june", "july", "august", "september",
+    "october", "november", "december", "jan", "feb", "mar", "apr", "jun", "jul", "aug",
+    "sep", "sept", "oct", "nov", "dec", "q1", "q2", "q3", "q4", "h1", "h2", "9m",
+    "fy24", "fy25", "fy26", "fy27", "fy28", "fy29", "fy30", "year", "years", "month",
+    "months", "crore", "crores", "cr", "inr", "rs", "bse", "nse", "date",
+}
+
+
+def extract_content_words(text: str) -> set[str]:
+    """Extract normalized content word stems, dropping stopwords and dates."""
+    if not text:
+        return set()
+    words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+    content_words = set()
+    for w in words:
+        if w in MILESTONE_STOPWORDS:
+            continue
+        # Suffix stemming & z/s normalization
+        w = w.replace("z", "s")
+        if w.endswith("tion"):
+            w = w[:-4]
+        elif w.endswith("ing") and len(w) > 5:
+            w = w[:-3]
+        elif w.endswith("ies") and len(w) > 4:
+            w = w[:-3] + "y"
+        elif w.endswith("ed") and len(w) > 4:
+            w = w[:-2]
+        elif w.endswith("es") and len(w) > 4:
+            w = w[:-2]
+        elif w.endswith("s") and len(w) > 3 and not w.endswith("ss"):
+            w = w[:-1]
+        elif w.endswith("ise"):
+            w = w[:-3] + "is"
+        if len(w) >= 3 and w not in MILESTONE_STOPWORDS:
+            content_words.add(w)
+    return content_words
+
+
+def compute_milestone_overlap(promise_stmt: str, event_what: str) -> float:
+    """Compute content-word overlap between promise statement and event what."""
+    p_words = extract_content_words(promise_stmt)
+    e_words = extract_content_words(event_what)
+    if not p_words or not e_words:
+        return 0.0
+    intersection = p_words & e_words
+    union = p_words | e_words
+    return len(intersection) / len(union) if union else 0.0
+
+
 def has_period_ended(applies_to_str: str, latest_quarter_str: str = "Q2 FY27") -> bool:
     """Determine whether applies_to period has concluded relative to latest data."""
     t_fy, t_q = parse_fiscal_period(applies_to_str)
@@ -719,13 +923,24 @@ def group_targets_and_build_timeline(
         }
         consolidated_targets.append(t_obj)
 
-        timeline_entries.append({
-            "metric": metric,
-            "segment": segment,
-            "applies_to": applies_to,
-            "evolution": evolution_str,
-            "items": items_sorted,
-        })
+        # Only include in timeline_entries if 2+ items AND values actually changed
+        values_set = set()
+        for it in items_sorted:
+            td = it.get("target") or {}
+            v = td.get("value") or (f"{td.get('low')}-{td.get('high')}" if td.get("low") is not None else None)
+            if v is not None:
+                values_set.add(str(v).strip().lower())
+
+        has_actual_change = len(values_set) >= 2 or revision_label in ["raised", "cut", "widened", "narrowed"]
+
+        if len(items_sorted) >= 2 and has_actual_change:
+            timeline_entries.append({
+                "metric": metric,
+                "segment": segment,
+                "applies_to": applies_to,
+                "evolution": evolution_str,
+                "items": items_sorted,
+            })
         target_idx += 1
 
     return consolidated_targets, timeline_entries
@@ -1044,20 +1259,17 @@ def find_candidates_for_target(
 
     # Case 1: Milestone target
     if t_metric == "milestone":
-        t_stmt_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", target.get("statement", "").lower()))
-        stop_words = {"this", "that", "with", "from", "will", "have", "been", "year", "next", "start", "about", "around", "target", "expect", "plan", "facility", "plant", "commercial", "production"}
-        t_keywords = t_stmt_words - stop_words
-
+        t_stmt = target.get("statement", "")
         for e in events:
+            e_what = e.get("what") or ""
+            overlap = compute_milestone_overlap(t_stmt, e_what)
+            if overlap < 0.2:
+                continue
+
             e_seg = e.get("segment")
-            e_what = (e.get("what") or "").lower()
-            e_words = set(re.findall(r"\b[a-zA-Z]{4,}\b", e_what))
+            seg_match = (t_seg is not None and e_seg == t_seg) or (t_seg is not None and t_seg in e_what.lower())
 
-            # Segment match or keyword match
-            seg_match = (t_seg is not None and e_seg == t_seg) or (t_seg is not None and t_seg in e_what)
-            kw_match = bool(t_keywords & e_words)
-
-            if seg_match or (t_seg is None and kw_match):
+            if seg_match or t_seg is None:
                 e_date = str(e.get("event_date") or "")
                 e_period = e.get("period_reported", "")
                 if (e_date and t_first_date and e_date > t_first_date) or (e_period != t_first_period):
@@ -1065,9 +1277,15 @@ def find_candidates_for_target(
         return candidates
 
     # Case 2: Quantitative target
-    # 2a. Match in reported items (R) with the SAME segment only
+    t_applies_to = target.get("applies_to", "")
+
+    # 2a. Match in reported items (R) with the SAME segment only and period falls inside applies_to
     for r in r_items:
         if r.get("metric") == t_metric:
+            r_cov = r.get("covers") or r.get("period") or ""
+            if not period_falls_inside(r_cov, t_applies_to):
+                continue
+
             r_seg = r.get("segment")
             seg_match = False
             if t_seg is None and r_seg is None:
@@ -1081,22 +1299,12 @@ def find_candidates_for_target(
                 candidates.append(r)
 
     # 2b. Match in financial items (N) - whole company only. Never for segment targets!
+    # Evidence covers period must fall inside target's applies_to.
     if t_seg is None:
-        t_app = normalize_period(target.get("applies_to", ""))
         for n in n_items:
             if n.get("metric") == t_metric:
-                n_cov = normalize_period(n.get("covers", ""))
-                if t_app and n_cov:
-                    if n_cov == t_app or t_app in n_cov or n_cov == "TTM":
-                        candidates.append(n)
-                    elif t_metric in ["revenue_growth", "pat_growth"] and n.get("label", "").endswith("YoY growth"):
-                        if t_app in (n.get("description") or ""):
-                            candidates.append(n)
-                else:
-                    candidates.append(n)
-        if not candidates:
-            for n in n_items:
-                if n.get("metric") == t_metric:
+                n_cov = n.get("covers", "")
+                if period_falls_inside(n_cov, t_applies_to):
                     candidates.append(n)
 
     return candidates
@@ -1416,38 +1624,49 @@ def format_override_evidence_sentence(
     # Format guided target
     t_target = target.get("target") or {}
     is_currency = t_unit_norm in ["₹ cr", "cr", "inr cr"]
-    r_sym = "₹" if is_currency else ""
-    guided_unit = "%" if is_pct else (" cr" if is_currency else (f" {t_unit_norm}" if t_unit_norm else ""))
-    if t_target.get("value") is not None:
-        try:
-            gv = float(t_target["value"])
-            val_fmt = f"{gv:,.0f}" if gv >= 1000 else f"{gv:g}"
-            guided_str = f"{r_sym}{val_fmt}{guided_unit}"
-        except (ValueError, TypeError):
-            guided_str = str(t_target["value"])
-    elif t_target.get("low") is not None and t_target.get("high") is not None:
-        try:
-            lv = float(t_target["low"])
-            hv = float(t_target["high"])
-            l_fmt = f"{lv:,.0f}" if lv >= 1000 else f"{lv:g}"
-            h_fmt = f"{hv:,.0f}" if hv >= 1000 else f"{hv:g}"
-            guided_str = f"{r_sym}{l_fmt}–{r_sym}{h_fmt}{guided_unit}"
-        except (ValueError, TypeError):
-            guided_str = f"{r_sym}{low_f:g}–{r_sym}{high_f:g}{guided_unit}"
-    else:
-        l_fmt = f"{low_f:,.0f}" if low_f >= 1000 else f"{low_f:g}"
-        h_fmt = f"{high_f:,.0f}" if high_f >= 1000 else f"{high_f:g}"
-        guided_str = f"{r_sym}{l_fmt}–{r_sym}{h_fmt}{guided_unit}"
-        
-    if is_pct:
+
+    if is_currency:
+        if t_target.get("value") is not None:
+            guided_str = format_money(t_target["value"], "cr")
+        elif t_target.get("low") is not None and t_target.get("high") is not None:
+            guided_str = format_money_range(t_target["low"], t_target["high"], "cr")
+        else:
+            guided_str = format_money_range(low_f, high_f, "cr")
+
+        effective_str = format_money(effective_val, "cr")
+        if multiplier > 1.0:
+            return f"{covers} {metric_name} at current run-rate: {effective_str} ({eid_str}) vs {guided_str} guided"
+        else:
+            return f"{covers} {metric_name}: {effective_str} ({eid_str}) vs {guided_str} guided"
+
+    elif is_pct:
+        if t_target.get("value") is not None:
+            try:
+                guided_str = f"{float(t_target['value']):.1f}%"
+            except (ValueError, TypeError):
+                guided_str = f"{t_target['value']}%"
+        elif t_target.get("low") is not None and t_target.get("high") is not None:
+            guided_str = f"{float(t_target['low']):.1f}–{float(t_target['high']):.1f}%"
+        else:
+            guided_str = f"{low_f:.1f}–{high_f:.1f}%"
+
         val_str = f"{effective_val:.1f}%"
         return f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
+
     else:
-        u_suffix = " cr" if is_currency else (f" {t_unit_norm}" if t_unit_norm else "")
-        if multiplier > 1.0:
-            return f"{covers} {metric_name} at current run-rate: {r_sym}{effective_val:,.0f}{u_suffix} ({eid_str}) vs {guided_str} guided"
+        u_suffix = f" {t_unit_norm}" if t_unit_norm else ""
+        if t_target.get("value") is not None:
+            guided_str = f"{format_indian_number(t_target['value'])}{u_suffix}"
+        elif t_target.get("low") is not None and t_target.get("high") is not None:
+            guided_str = f"{format_indian_number(t_target['low'])}–{format_indian_number(t_target['high'])}{u_suffix}"
         else:
-            return f"{covers} {metric_name} {r_sym}{effective_val:,.0f}{u_suffix} ({eid_str}) vs {guided_str} guided"
+            guided_str = f"{format_indian_number(low_f)}–{format_indian_number(high_f)}{u_suffix}"
+
+        val_str = f"{format_indian_number(effective_val)}{u_suffix}"
+        if multiplier > 1.0:
+            return f"{covers} {metric_name} at current run-rate: {val_str} ({eid_str}) vs {guided_str} guided"
+        else:
+            return f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
 
 
 def apply_python_overrides_and_runrates(
@@ -1588,6 +1807,14 @@ def apply_python_overrides_and_runrates(
                         elif val_f < 50 and high_f > 100:
                             val_f = val_f * 1000.0
 
+                    # Period check: evidence covers period must fall inside target applies_to
+                    if not period_falls_inside(covers_str, applies_to):
+                        logger.warning(
+                            "Evidence covers %s outside target applies_to %s for target %s",
+                            covers_str, applies_to, t_id
+                        )
+                        continue
+
                     if is_amount:
                         t_len, cov_len = get_period_length_and_months_covered(applies_to, covers_str)
                         multiplier = (t_len / cov_len) if cov_len > 0 else 1.0
@@ -1599,76 +1826,48 @@ def apply_python_overrides_and_runrates(
                         effective_val = val_f
                         run_rate_label = ""
 
-                    # Bounds check logic
-                    if effective_val < low_f:
-                        if period_ended:
-                            new_v = "likely_missed" if is_partial else "missed"
+                    # Direction by metric:
+                    # - Capex is neutral: above_plan / within_plan / below_plan
+                    # - Credit cost: lower is better (below range is good)
+                    # - Revenue, margins, growth, volume: higher is better
+                    metric = t.get("metric", "")
+                    if metric == "capex":
+                        if effective_val > high_f:
+                            new_v = "above_plan"
+                        elif effective_val < low_f:
+                            new_v = "below_plan"
                         else:
-                            new_v = "behind"
-
-                        if verdict != new_v:
-                            orig_v = verdict
-                            verdict = new_v
-                            overrides_count += 1
-                            evidence_text = format_override_evidence_sentence(
-                                target=t,
-                                evidence_item=e,
-                                effective_val=effective_val,
-                                multiplier=multiplier,
-                                low_f=low_f,
-                                high_f=high_f,
-                                ev_ids=ev_ids,
-                                t_unit_norm=t_unit_norm,
-                            )
-                            logger.warning("Override [%s]: %s -> %s (effective %s < low %s)", t_id, orig_v, verdict, effective_val, low_f)
-
-                    elif effective_val > high_f:
-                        if period_ended:
-                            if is_partial:
-                                new_v = "likely_delivered"
-                            else:
-                                new_v = "delivered"
+                            new_v = "within_plan"
+                    elif metric == "credit_cost":
+                        if effective_val < low_f:
+                            new_v = ("likely_delivered" if is_partial else "delivered") if period_ended else "ahead"
+                        elif effective_val > high_f:
+                            new_v = ("likely_missed" if is_partial else "missed") if period_ended else "behind"
                         else:
-                            new_v = "ahead"
-
-                        if verdict != new_v:
-                            orig_v = verdict
-                            verdict = new_v
-                            overrides_count += 1
-                            evidence_text = format_override_evidence_sentence(
-                                target=t,
-                                evidence_item=e,
-                                effective_val=effective_val,
-                                multiplier=multiplier,
-                                low_f=low_f,
-                                high_f=high_f,
-                                ev_ids=ev_ids,
-                                t_unit_norm=t_unit_norm,
-                            )
-                            logger.warning("Override [%s]: %s -> %s (effective %s > high %s)", t_id, orig_v, verdict, effective_val, high_f)
-
+                            new_v = ("likely_delivered" if is_partial else "delivered") if period_ended else "on_track"
                     else:
-                        # Within range [low_f, high_f]
-                        if period_ended:
-                            new_v = "likely_delivered" if is_partial else "delivered"
+                        if effective_val > high_f:
+                            new_v = ("likely_delivered" if is_partial else "delivered") if period_ended else "ahead"
+                        elif effective_val < low_f:
+                            new_v = ("likely_missed" if is_partial else "missed") if period_ended else "behind"
                         else:
-                            new_v = "on_track"
+                            new_v = ("likely_delivered" if is_partial else "delivered") if period_ended else "on_track"
 
-                        if verdict != new_v:
-                            orig_v = verdict
-                            verdict = new_v
-                            overrides_count += 1
-                            evidence_text = format_override_evidence_sentence(
-                                target=t,
-                                evidence_item=e,
-                                effective_val=effective_val,
-                                multiplier=multiplier,
-                                low_f=low_f,
-                                high_f=high_f,
-                                ev_ids=ev_ids,
-                                t_unit_norm=t_unit_norm,
-                            )
-                            logger.warning("Override [%s]: %s -> %s (within range [%s, %s])", t_id, orig_v, verdict, low_f, high_f)
+                    if verdict != new_v:
+                        orig_v = verdict
+                        verdict = new_v
+                        overrides_count += 1
+                        evidence_text = format_override_evidence_sentence(
+                            target=t,
+                            evidence_item=e,
+                            effective_val=effective_val,
+                            multiplier=multiplier,
+                            low_f=low_f,
+                            high_f=high_f,
+                            ev_ids=ev_ids,
+                            t_unit_norm=t_unit_norm,
+                        )
+                        logger.warning("Override [%s]: %s -> %s (effective %s vs [%s, %s])", t_id, orig_v, verdict, effective_val, low_f, high_f)
 
             except (ValueError, TypeError):
                 pass
@@ -1850,7 +2049,7 @@ def judge_promises_for_company(
         for v in all_verdicts
     ]
     verdicts_summary = "\n".join(verdict_lines)
-    read_template_path = Path(__file__).resolve().parent / "prompts" / "read_v3.txt"
+    read_template_path = Path(__file__).resolve().parent / "prompts" / "read_v4.txt"
     if read_template_path.exists():
         read_template = read_template_path.read_text(encoding="utf-8")
     else:
@@ -1863,10 +2062,16 @@ def judge_promises_for_company(
     read_resp = call_json(
         task="bulk",
         prompt=read_prompt,
-        prompt_version="read_v3",
+        prompt_version="read_v4",
         use_cache=True,
     )
     read_text = read_resp.get("read", "") if isinstance(read_resp, dict) else ""
+
+    # Clean any subjective praise/judgment words if present
+    bad_words = ["solid", "strong", "robust", "well-managed", "impressive", "healthy", "commendable", "prudent"]
+    for bw in bad_words:
+        read_text = re.sub(rf"\b(?:a\s+)?{bw}\b", "", read_text, flags=re.IGNORECASE)
+    read_text = re.sub(r"\s+", " ", read_text).strip()
 
     # Tally counts
     counts_dict: dict[str, int] = {
@@ -1878,6 +2083,9 @@ def judge_promises_for_company(
         "likely_missed": 0,
         "missed": 0,
         "partly": 0,
+        "above_plan": 0,
+        "within_plan": 0,
+        "below_plan": 0,
         "pending": 0,
         "unverifiable": 0,
         "not_judged": 0,
@@ -1899,6 +2107,12 @@ def judge_promises_for_company(
         counts_parts.append(f"{counts_dict['ahead']} ahead")
     if counts_dict["on_track"]:
         counts_parts.append(f"{counts_dict['on_track']} on track")
+    if counts_dict["within_plan"]:
+        counts_parts.append(f"{counts_dict['within_plan']} within plan")
+    if counts_dict["above_plan"]:
+        counts_parts.append(f"{counts_dict['above_plan']} above plan")
+    if counts_dict["below_plan"]:
+        counts_parts.append(f"{counts_dict['below_plan']} below plan")
     if counts_dict["behind"]:
         counts_parts.append(f"{counts_dict['behind']} behind")
     if counts_dict["likely_missed"]:

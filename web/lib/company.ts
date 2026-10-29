@@ -206,6 +206,15 @@ export function formatVerdictChip(verdict: string): {
   if (norm === "on_track") {
     return { label: "On track", isLikely: false, group, colorClass: "text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 border-neutral-300 dark:border-neutral-700" };
   }
+  if (norm === "above_plan" || norm === "above plan") {
+    return { label: "Above plan", isLikely: false, group: "in_progress", colorClass: "text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 border-neutral-300 dark:border-neutral-700" };
+  }
+  if (norm === "within_plan" || norm === "within plan") {
+    return { label: "Within plan", isLikely: false, group: "in_progress", colorClass: "text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 border-neutral-300 dark:border-neutral-700" };
+  }
+  if (norm === "below_plan" || norm === "below plan") {
+    return { label: "Below plan", isLikely: false, group: "in_progress", colorClass: "text-neutral-700 dark:text-neutral-300 bg-neutral-100 dark:bg-neutral-800 border-neutral-300 dark:border-neutral-700" };
+  }
   if (norm === "pending") {
     return { label: "Too early", isLikely: false, group, colorClass: "text-neutral-600 dark:text-neutral-400 bg-neutral-50 dark:bg-neutral-900 border-neutral-200 dark:border-neutral-800" };
   }
@@ -220,8 +229,8 @@ export function getPromiseSortPriority(verdict: string): number {
   if (norm === "behind") return 2;
   // 3: Kept / Ahead
   if (norm === "delivered" || norm === "likely_delivered" || norm === "ended + ahead" || norm === "ahead") return 3;
-  // 4: On track
-  if (norm === "on_track") return 4;
+  // 4: On track / Neutral Capex plans
+  if (norm === "on_track" || norm.includes("plan")) return 4;
   // 5: Collapsed row (too early, can't verify)
   return 5;
 }
@@ -264,10 +273,15 @@ export function cleanEvidenceText(evidence?: string): string {
   text = text.replace(/\s*\([A-Z]\d+\)/g, "");
   text = text.replace(/\s*citing\s+[A-Z]\d+\b/gi, "");
 
-  // 2. Prepend ₹ on every amount in cr/crores if missing
-  // E.g. "56,000 cr" -> "₹56,000 cr", "1,200–1,300 cr" -> "₹1,200–₹1,300 cr"
-  text = text.replace(/(?<![₹$])\b(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:cr|crores)\b/gi, "₹$1 cr");
-  text = text.replace(/(?<![₹$])\b(\d+(?:,\d+)*)–(?<![₹$])(\d+(?:,\d+)*)\s*(?:cr|crores)\b/gi, "₹$1–₹$2 cr");
+  // 2. Fix broken double currency symbols like ₹1,₹600 cr or 1,₹600 cr
+  text = text.replace(/₹\s*(\d+)\s*,\s*₹\s*(\d+)/g, "₹$1,$2");
+  text = text.replace(/(\d+)\s*,\s*₹\s*(\d+)/g, "₹$1,$2");
+  text = text.replace(/₹\s*₹+/g, "₹");
+
+  // Prepend ₹ on every amount in cr/crores strictly before the number, never inside
+  text = text.replace(/(^|[^\d₹$,])(\d{1,3}(?:,\d{2,3})*(?:\.\d+)?)\s*(?:cr|crores)\b/gi, "$1₹$2 cr");
+  text = text.replace(/(^|[^\d₹$,])(\d{1,3}(?:,\d{2,3})*)–(\d{1,3}(?:,\d{2,3})*)\s*(?:cr|crores)\b/gi, "$1₹$2–$3 cr");
+  text = text.replace(/₹\s*₹+/g, "₹");
 
   // 3. Ensure "at current run-rate" on run-rate evidence
   if (/\brun-rate\b/i.test(text) && !/at current run-rate/i.test(text)) {
@@ -293,9 +307,13 @@ function formatGuidanceUnits(val: string): string {
   s = s.replace(/(\d+)\$/g, "$$$1B");
   s = s.replace(/(\d+)x\b/gi, "$1×");
 
-  // Currency
-  s = s.replace(/(?<![₹$])\b(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:cr|crores)\b/gi, "₹$1 cr");
-  s = s.replace(/(\d+)\s*–\s*(\d+)₹\s*cr/gi, "₹$1–$2 cr");
+  // Currency: clean double symbols and format
+  s = s.replace(/₹\s*(\d+)\s*,\s*₹\s*(\d+)/g, "₹$1,$2");
+  s = s.replace(/(\d+)\s*,\s*₹\s*(\d+)/g, "₹$1,$2");
+  s = s.replace(/₹\s*₹+/g, "₹");
+  s = s.replace(/(\d+(?:,\d+)*)\s*₹\s*cr/gi, "₹$1 cr");
+  s = s.replace(/(^|[^\d₹$,])(\d{1,3}(?:,\d{2,3})*(?:\.\d+)?)\s*(?:cr|crores)\b/gi, "$1₹$2 cr");
+  s = s.replace(/₹\s*₹+/g, "₹");
 
   return s;
 }
@@ -338,8 +356,17 @@ export function parseRevisedTimeline(timelineList: string[]): RevisedGuidance[] 
       }
     }
 
-    // Rule: ONLY chains of 2+ numeric values of the same metric, segment and period. Otherwise hide.
+    // Rule: ONLY chains of 2+ numeric values of the same metric, segment and period.
     if (steps.length < 2) {
+      continue;
+    }
+
+    // Rule: “How the story changed” ONLY shows chains where the value actually changed.
+    const normalizedValues = new Set(
+      steps.map((s) => s.value.replace(/[\s₹$cr–-]+/gi, "").toLowerCase())
+    );
+    if (normalizedValues.size < 2) {
+      // Values are identical across all steps (no actual change)
       continue;
     }
 
