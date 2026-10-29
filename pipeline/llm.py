@@ -54,10 +54,10 @@ def get_gemini_client(has_pdf: bool = False) -> genai.Client:
         return _client_pdf
     else:
         if _client_text is None:
-            # HttpOptions timeout is in milliseconds: 20 seconds = 20,000 ms
+            # HttpOptions timeout is in milliseconds: 60 seconds = 60,000 ms
             _client_text = genai.Client(
                 api_key=GEMINI_API_KEY,
-                http_options=types.HttpOptions(timeout=20_000),
+                http_options=types.HttpOptions(timeout=60_000),
             )
         return _client_text
 

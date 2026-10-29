@@ -443,15 +443,55 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
         # 4. Parse documents section
         concalls, latest_ar = parse_documents_section(soup)
 
-        # Pick 5 most recent transcripts
-        selected_transcripts: list[dict[str, Any]] = []
-        for c in concalls:
-            if c.get("transcript_url"):
-                selected_transcripts.append(c)
-                if len(selected_transcripts) == 5:
-                    break
+        # Collect transcripts until we have 5 distinct quarters
+        quarter_transcripts: dict[str, list[dict[str, Any]]] = {}
+        distinct_quarter_order: list[str] = []
+        transcript_notes: list[str] = []
 
-        target_quarters = [c["period"] for c in selected_transcripts]
+        for c in concalls:
+            t_url = c.get("transcript_url")
+            if not t_url:
+                continue
+
+            q = c["period"]
+            if q not in quarter_transcripts:
+                if len(distinct_quarter_order) >= 5:
+                    continue
+                quarter_transcripts[q] = [c]
+                distinct_quarter_order.append(q)
+            else:
+                # Quarter already seen: check if duplicate or distinctly different event
+                existing_list = quarter_transcripts[q]
+                is_duplicate = False
+                for ex in existing_list:
+                    ex_url = ex.get("transcript_url", "")
+                    # If one is BSE and one is company site / alternate link for same period
+                    if ("bseindia.com" in ex_url and "bseindia.com" not in t_url) or (
+                        "bseindia.com" in t_url and "bseindia.com" not in ex_url
+                    ):
+                        # Same quarter results call; prefer the BSE copy
+                        if "bseindia.com" in t_url and "bseindia.com" not in ex_url:
+                            existing_list.remove(ex)
+                            existing_list.append(c)
+                        is_duplicate = True
+                        break
+                    elif ex_url == t_url:
+                        is_duplicate = True
+                        break
+
+                if not is_duplicate:
+                    # Distinct event (e.g. separate business update or analyst meet)
+                    existing_list.append(c)
+                    transcript_notes.append(
+                        f"Kept multiple distinct transcripts for {q} (call on {c['date']})"
+                    )
+
+        # Flatten selected transcripts across the 5 distinct quarters
+        selected_transcripts: list[dict[str, Any]] = []
+        for q in distinct_quarter_order:
+            selected_transcripts.extend(quarter_transcripts[q])
+
+        target_quarters = distinct_quarter_order
 
         # Match presentations for those exact target quarters
         selected_ppts: dict[str, dict[str, Any]] = {}
@@ -470,18 +510,20 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
                 "period": latest_ar["period"],
                 "event_date": latest_ar["event_date"].isoformat(),
                 "url": latest_ar["url"],
+                "max_pages": 400,
             })
 
-        # 5 most recent transcripts
+        # Transcripts across 5 distinct quarters
         for t in selected_transcripts:
             target_docs.append({
                 "kind": "transcript",
                 "period": t["period"],
                 "event_date": t["date"].isoformat(),
                 "url": t["transcript_url"],
+                "max_pages": 400,
             })
 
-        # Presentations for the same quarters
+        # Presentations for the same quarters (capped at 60 pages)
         for q in target_quarters:
             if q in selected_ppts:
                 c = selected_ppts[q]
@@ -490,6 +532,7 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
                     "period": q,
                     "event_date": c["date"].isoformat(),
                     "url": c["ppt_url"],
+                    "max_pages": 60,
                 })
 
         # 5. Download and extract text for target documents (skip if already in documents)
@@ -498,12 +541,29 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
         for doc in target_docs:
             url = doc["url"]
             doc_id = hashlib.sha256(url.encode("utf-8")).hexdigest()
+            doc_kind = doc["kind"]
+            max_pages = doc.get("max_pages", 400)
 
             # Check if document already exists
             existing_docs = select("documents", id=doc_id)
             if existing_docs:
                 row = existing_docs[0]
-                logger.info("Document already present: %s %s (%s)", doc["kind"], doc["period"], doc_id[:8])
+                # If an existing presentation violates the rule (text_ok=false and > 60 pages), remove and skip
+                if doc_kind == "presentation" and not row.get("text_ok", True) and row.get("page_count", 0) > 60:
+                    logger.info("Removing presentation with text_ok=False and >60 pages: %s", doc_id[:8])
+                    get_client().table("documents").delete().eq("id", doc_id).execute()
+                    documents_summary.append({
+                        "kind": doc_kind,
+                        "period": doc["period"],
+                        "page_count": row.get("page_count", 0),
+                        "text_ok": False,
+                        "url": url,
+                        "skipped": True,
+                        "note": "Skipped: presentation text_ok=False and over 60 pages",
+                    })
+                    continue
+
+                logger.info("Document already present: %s %s (%s)", doc_kind, doc["period"], doc_id[:8])
                 documents_summary.append({
                     "kind": row["kind"],
                     "period": row["period"],
@@ -515,12 +575,12 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
                 continue
 
             # Download PDF
-            logger.info("Downloading %s for %s (%s)...", doc["kind"], doc["period"], url)
+            logger.info("Downloading %s for %s (%s)...", doc_kind, doc["period"], url)
             pdf_bytes = client.download_pdf(url)
             if not pdf_bytes:
                 logger.error("Failed to download PDF: %s", url)
                 documents_summary.append({
-                    "kind": doc["kind"],
+                    "kind": doc_kind,
                     "period": doc["period"],
                     "page_count": 0,
                     "text_ok": False,
@@ -529,14 +589,34 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
                 })
                 continue
 
-            # Extract pages with pypdf (cap at 400 for annual report or long PDFs)
-            pages, page_count, text_ok = extract_pdf_pages(pdf_bytes, max_pages=400)
+            # Check raw page count for presentation rule: skip if text_ok=False and > 60 pages
+            try:
+                reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+                raw_total_pages = len(reader.pages)
+            except Exception:
+                raw_total_pages = 0
+
+            # Extract pages with pypdf (cap at max_pages: 60 for presentations, 400 for reports/transcripts)
+            pages, page_count, text_ok = extract_pdf_pages(pdf_bytes, max_pages=max_pages)
+
+            if doc_kind == "presentation" and raw_total_pages > 60 and not text_ok:
+                logger.info("Skipping presentation %s %s: text_ok=False and raw pages %d > 60", doc_kind, doc["period"], raw_total_pages)
+                documents_summary.append({
+                    "kind": doc_kind,
+                    "period": doc["period"],
+                    "page_count": raw_total_pages,
+                    "text_ok": False,
+                    "url": url,
+                    "skipped": True,
+                    "note": f"Skipped: presentation text_ok=False and {raw_total_pages} pages (> 60)",
+                })
+                continue
 
             # Upsert into documents
             doc_row = {
                 "id": doc_id,
                 "ticker": ticker,
-                "kind": doc["kind"],
+                "kind": doc_kind,
                 "period": doc["period"],
                 "event_date": doc["event_date"],
                 "url": url,
@@ -546,10 +626,10 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
                 "fetched_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             }
             upsert("documents", doc_row, on_conflict="id")
-            logger.info("Stored document %s %s: %d pages, text_ok=%s", doc["kind"], doc["period"], page_count, text_ok)
+            logger.info("Stored document %s %s: %d pages, text_ok=%s", doc_kind, doc["period"], page_count, text_ok)
 
             documents_summary.append({
-                "kind": doc["kind"],
+                "kind": doc_kind,
                 "period": doc["period"],
                 "page_count": page_count,
                 "text_ok": text_ok,
@@ -558,11 +638,11 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
             })
 
         # Notes on missing items
-        missing_notes: list[str] = []
+        missing_notes: list[str] = list(transcript_notes)
         if not latest_ar:
             missing_notes.append("Annual report: not found on screener")
-        if len(selected_transcripts) < 5:
-            missing_notes.append(f"Transcripts: only {len(selected_transcripts)} found (less than 5 available)")
+        if len(distinct_quarter_order) < 5:
+            missing_notes.append(f"Transcripts: only {len(distinct_quarter_order)} distinct quarters found (less than 5 available)")
         for q in target_quarters:
             if q not in selected_ppts:
                 missing_notes.append(f"Presentation for {q}: not found on screener")
@@ -609,6 +689,10 @@ def print_coverage_summary(summary: dict[str, Any]) -> None:
     print(f"Quarters in quarterly table ({len(quarters)}): {', '.join(quarters)}")
     print(f"\nDocuments found ({len(docs)}):")
     for d in docs:
+        if d.get("note"):
+            print(f"  - [{d['kind']:<13}] {d['period']:<8}: [SKIPPED] {d['note']}")
+            print(f"    URL: {d['url']}")
+            continue
         status_flag = " (cached)" if d.get("skipped") else ""
         err_flag = f" [ERROR: {d['error']}]" if d.get("error") else ""
         print(f"  - [{d['kind']:<13}] {d['period']:<8}: {d['page_count']:>3} pages, text_ok={str(d['text_ok']):<5}{status_flag}{err_flag}")

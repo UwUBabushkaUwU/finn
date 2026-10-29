@@ -1,0 +1,31 @@
+You read the transcript of an Indian listed company's earnings call for {period}. Extract what management committed to and what they reported. Use only this transcript. Ignore anything said by analysts except as context for a management answer.
+
+Return JSON:
+{
+ "guidance": [ {
+   "metric": a short lowercase name, e.g. "revenue growth", "ebitda margin", "capex", "order book", "aum growth", "credit cost", "plant commissioning",
+   "statement": what management committed to, in at most 20 words,
+   "target": {"value": number or null, "low": number or null, "high": number or null, "unit": "%", "₹ cr", "date", etc., "direction": "up" | "down" | "flat" | null},
+   "applies_to": the period the target is for, as said or clearly implied, e.g. "FY27", "H2 FY27", "Q3 FY27", "next 2-3 years",
+   "firmness": "explicit" if it has a number or a date, "soft" if it is directional ("we expect improvement"),
+   "update_of_earlier": true if management is restating, raising, cutting or delaying an earlier target, else false,
+   "quote": the exact words from the transcript, copied character for character, at most 40 words,
+   "speaker": name and title as printed,
+   "page": page number
+ } ],
+ "reported": [ {
+   "metric": as above,
+   "value": number, "unit": "...",
+   "period": the period the figure is for,
+   "quote": exact words, at most 30 words,
+   "page": page number
+ } ]
+}
+
+"reported" is for figures management states for the period that are not in a standard profit and loss statement: order book, AUM, volumes, capacity utilisation, segment revenue, customer count, and so on.
+Include only commitments about the company's own future performance. Skip pleasantries, industry outlook and generic statements like "we remain confident".
+If the transcript has no guidance, return empty lists. Never invent a quote.
+
+Transcript text:
+{transcript_text}
+
