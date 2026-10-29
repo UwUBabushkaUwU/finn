@@ -197,3 +197,4 @@ if __name__ == "__main__":
     print(f"\nCustomers & Markets: {data.get('customers_and_markets')}")
     print(f"Pages used: {data.get('pages_used')}")
     print("=" * 70)
+

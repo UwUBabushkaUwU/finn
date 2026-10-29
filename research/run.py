@@ -233,3 +233,4 @@ if __name__ == "__main__":
         success = run_pipeline_for_ticker(args.ticker)
         if not success:
             sys.exit(1)
+

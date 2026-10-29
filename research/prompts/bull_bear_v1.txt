@@ -3,3 +3,4 @@ Return JSON: {"bull": [{"point": "...", "ids": [...]}], "bear": [...]}
 
 Facts:
 {facts_block}
+
