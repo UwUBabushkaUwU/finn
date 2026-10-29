@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono, Newsreader } from "next/font/google";
 import "./globals.css";
+import { TabBar } from "@/components/TabBar";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -59,8 +60,11 @@ export default function RootLayout({
           }}
         />
       </head>
-      <body className="min-h-full flex flex-col font-sans bg-[#fcfbf9] text-neutral-900 dark:bg-[#0c0d0e] dark:text-neutral-100">
-        {children}
+      <body className="min-h-full flex flex-col font-sans bg-[#fcfbf9] text-neutral-900 dark:bg-[#0c0d0e] dark:text-neutral-100 pb-20">
+        <div className="flex-1 w-full">
+          {children}
+        </div>
+        <TabBar />
       </body>
     </html>
   );

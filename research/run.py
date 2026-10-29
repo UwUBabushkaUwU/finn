@@ -68,6 +68,12 @@ def update_job_status(
         "step": step,
         "error": error,
     }
+
+    # Ensure requested_at is populated if inserting new job
+    existing = select("research_jobs", ticker=ticker)
+    if not existing:
+        job_data["requested_at"] = now_iso
+
     if set_started:
         job_data["started_at"] = now_iso
     if set_finished:
@@ -126,70 +132,75 @@ def run_pipeline_for_ticker(ticker: str) -> bool:
     print(f"STARTING RESEARCH RUN FOR: {ticker}")
     print(f"{sep}\n")
 
-    # Step 0: Set job status to running
-    update_job_status(ticker, status="running", step="build_corpus", error=None, set_started=True)
+    # Step 1: Finding filings and transcripts (corpus)
+    step_1 = "Finding filings and transcripts"
+    update_job_status(ticker, status="running", step=step_1, error=None, set_started=True)
 
-    # 1. build_corpus
     try:
-        logger.info("[Step 1/5] Building corpus for %s...", ticker)
+        logger.info("[Step 1/6] %s for %s...", step_1, ticker)
         build_corpus_for_ticker(ticker)
     except Exception as exc:
-        err = f"build_corpus failed: {exc}"
-        logger.error(err)
-        update_job_status(ticker, status="failed", step="build_corpus", error=err, set_finished=True)
+        err = str(exc)
+        logger.error("Corpus building failed for %s: %s", ticker, err)
+        update_job_status(ticker, status="failed", step=step_1, error=err, set_finished=True)
         return False
 
-    # 2. promises
+    # Step 2 & 3: Reading earnings calls & Checking promises against results
     try:
-        update_job_status(ticker, status="running", step="promises")
-        logger.info("[Step 2/5] Evaluating promises & guidance for %s...", ticker)
-        run_promises_for_ticker(ticker)
+        logger.info("[Step 2 & 3/6] Reading concalls and checking promises for %s...", ticker)
+        run_promises_for_ticker(
+            ticker,
+            on_step=lambda st: update_job_status(ticker, status="running", step=st),
+        )
     except Exception as exc:
-        err = f"promises failed: {exc}"
-        logger.error(err)
-        update_job_status(ticker, status="failed", step="promises", error=err, set_finished=True)
+        err = str(exc)
+        logger.error("Promises failed for %s: %s", ticker, err)
+        update_job_status(ticker, status="failed", step="Checking promises against results", error=err, set_finished=True)
         return False
 
-    # 3. numbers
+    # Step 4: Crunching the numbers
+    step_4 = "Crunching the numbers"
     try:
-        update_job_status(ticker, status="running", step="numbers")
-        logger.info("[Step 3/5] Computing financial numbers & flags for %s...", ticker)
+        update_job_status(ticker, status="running", step=step_4)
+        logger.info("[Step 4/6] %s for %s...", step_4, ticker)
         compute_numbers_for_ticker(ticker)
     except Exception as exc:
-        err = f"numbers failed: {exc}"
-        logger.error(err)
-        update_job_status(ticker, status="failed", step="numbers", error=err, set_finished=True)
+        err = str(exc)
+        logger.error("Numbers failed for %s: %s", ticker, err)
+        update_job_status(ticker, status="failed", step=step_4, error=err, set_finished=True)
         return False
 
-    # 4. snapshot
+    # Step 5: Reading the annual report (snapshot)
+    step_5 = "Reading the annual report"
     try:
-        update_job_status(ticker, status="running", step="snapshot")
-        logger.info("[Step 4/5] Extracting business snapshot for %s...", ticker)
+        update_job_status(ticker, status="running", step=step_5)
+        logger.info("[Step 5/6] %s for %s...", step_5, ticker)
         build_business_snapshot(ticker)
     except Exception as exc:
-        err = f"snapshot failed: {exc}"
-        logger.error(err)
-        update_job_status(ticker, status="failed", step="snapshot", error=err, set_finished=True)
+        err = str(exc)
+        logger.error("Snapshot failed for %s: %s", ticker, err)
+        update_job_status(ticker, status="failed", step=step_5, error=err, set_finished=True)
         return False
 
-    # 5. bull_bear
+    # Step 6: Writing the bull and bear case
+    step_6 = "Writing the bull and bear case"
     try:
-        update_job_status(ticker, status="running", step="bull_bear")
-        logger.info("[Step 5/5] Generating Bull & Bear case for %s...", ticker)
+        update_job_status(ticker, status="running", step=step_6)
+        logger.info("[Step 6/6] %s for %s...", step_6, ticker)
         generate_bull_bear_case(ticker)
     except Exception as exc:
-        err = f"bull_bear failed: {exc}"
-        logger.error(err)
-        update_job_status(ticker, status="failed", step="bull_bear", error=err, set_finished=True)
+        err = str(exc)
+        logger.error("Bull & Bear failed for %s: %s", ticker, err)
+        update_job_status(ticker, status="failed", step=step_6, error=err, set_finished=True)
         return False
 
-    # 6. Save section meta
+    # Meta
     try:
         save_section_meta(ticker)
     except Exception as exc:
         logger.warning("Error saving section meta for %s: %s", ticker, exc)
 
-    # Step 7: Mark job as done
+    # Step 7: Completed
     update_job_status(ticker, status="done", step="completed", error=None, set_finished=True)
     logger.info("Research run for %s successfully completed!", ticker)
     return True

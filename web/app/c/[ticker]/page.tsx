@@ -20,6 +20,7 @@ import { BusinessSnapshot } from "@/components/company/BusinessSnapshot";
 import { BullBearSection } from "@/components/company/BullBearSection";
 import { SourcesSection } from "@/components/company/SourcesSection";
 import { NoResearchState } from "@/components/company/NoResearchState";
+import { ResearchProgress, ResearchJob } from "@/components/company/ResearchProgress";
 
 export const revalidate = 300;
 
@@ -41,7 +42,7 @@ export default async function CompanyPage({ params }: PageProps) {
   const ticker = decodeURIComponent(rawTicker).toUpperCase();
 
   // Run queries in parallel
-  const [researchRes, priceRes, financialsRes, companyRes] = await Promise.all([
+  const [researchRes, priceRes, financialsRes, companyRes, jobRes] = await Promise.all([
     supabase.from("research").select("*").eq("ticker", ticker),
     supabase
       .from("prices")
@@ -51,12 +52,25 @@ export default async function CompanyPage({ params }: PageProps) {
       .limit(1),
     supabase.from("financials").select("*").eq("ticker", ticker).maybeSingle(),
     supabase.from("companies").select("*").eq("ticker", ticker).maybeSingle(),
+    supabase.from("research_jobs").select("*").eq("ticker", ticker).maybeSingle(),
   ]);
 
   const researchRows = researchRes.data || [];
   const latestPrice = (priceRes.data?.[0] as Price) || null;
   const financials = (financialsRes.data as FinancialsRow) || null;
   const company = (companyRes.data as Company) || null;
+  const job = (jobRes.data as ResearchJob) || null;
+
+  // If a job is actively queued, running, or failed, render the progress / error screen
+  if (job && (job.status === "queued" || job.status === "running" || job.status === "failed")) {
+    return (
+      <main className="min-h-screen bg-[#fcfbf9] text-neutral-900 dark:bg-[#0c0d0e] dark:text-neutral-100 selection:bg-neutral-200 dark:selection:bg-neutral-800">
+        <div className="mx-auto max-w-xl px-4 py-4 sm:px-6">
+          <ResearchProgress ticker={ticker} initialJob={job} company={company} />
+        </div>
+      </main>
+    );
+  }
 
   // If no research rows exist for this ticker, render the calm empty state
   if (researchRows.length === 0) {

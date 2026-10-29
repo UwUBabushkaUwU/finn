@@ -92,7 +92,7 @@ class ScreenerClient:
         # If neither had a populated table but standalone responded, return it
         if html:
             return html, "standalone"
-        raise RuntimeError(f"Failed to fetch valid screener page for ticker: {ticker}")
+        raise ValueError(f"screener.in has no data for {ticker}")
 
     def download_pdf(self, url: str) -> bytes | None:
         """Download a PDF document politely with retry."""
@@ -413,7 +413,7 @@ def build_corpus_for_ticker(ticker: str) -> dict[str, Any]:
         upsert("research_jobs", {
             "ticker": ticker,
             "status": "running",
-            "step": "corpus",
+            "step": "Finding filings and transcripts",
             "started_at": now_utc,
             "finished_at": None,
             "error": None,

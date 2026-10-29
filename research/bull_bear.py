@@ -197,12 +197,6 @@ def build_facts_catalog(
     # 3. Promises facts
     if promises_data:
         lines.append("\n[Management Promises & Guidance]")
-        read = promises_data.get("read")
-        if read:
-            fid = "P_READ"
-            catalog[fid] = f"Promises summary: {read}"
-            lines.append(f"- [{fid}] Promises summary: {read}")
-
         for v in promises_data.get("verdicts", []):
             vid = v.get("id")
             if not vid:
@@ -257,7 +251,7 @@ def generate_bull_bear_case(ticker: str) -> dict[str, Any]:
     response = call_json(
         task="reasoning",
         prompt=prompt,
-        prompt_version="bull_bear_v1",
+        prompt_version="bull_bear_v2",
         use_cache=True,
     )
 
@@ -270,7 +264,7 @@ def generate_bull_bear_case(ticker: str) -> dict[str, Any]:
     clean_bull: list[dict[str, Any]] = []
     clean_bear: list[dict[str, Any]] = []
 
-    # Filter and validate Bull points: drop any point whose ids don't exist
+    # Filter and validate Bull points: drop any point whose ids don't exist or cite P_READ
     for p in raw_bull:
         if not isinstance(p, dict):
             continue
@@ -280,8 +274,8 @@ def generate_bull_bear_case(ticker: str) -> dict[str, Any]:
             cites = [cites]
         if not cites:
             continue
-        # Drop if any cited ID doesn't exist
-        if any(c_id not in valid_ids for c_id in cites):
+        # Drop if P_READ is cited or any cited ID doesn't exist
+        if "P_READ" in cites or any(c_id not in valid_ids for c_id in cites):
             logger.warning("Dropping bull point with invalid IDs %s: %s", cites, pt)
             continue
         # Enforce <= 25 words
@@ -292,7 +286,7 @@ def generate_bull_bear_case(ticker: str) -> dict[str, Any]:
         if len(clean_bull) >= 3:
             break
 
-    # Filter and validate Bear points: drop any point whose ids don't exist
+    # Filter and validate Bear points: drop any point whose ids don't exist or cite P_READ
     for p in raw_bear:
         if not isinstance(p, dict):
             continue
@@ -302,8 +296,8 @@ def generate_bull_bear_case(ticker: str) -> dict[str, Any]:
             cites = [cites]
         if not cites:
             continue
-        # Drop if any cited ID doesn't exist
-        if any(c_id not in valid_ids for c_id in cites):
+        # Drop if P_READ is cited or any cited ID doesn't exist
+        if "P_READ" in cites or any(c_id not in valid_ids for c_id in cites):
             logger.warning("Dropping bear point with invalid IDs %s: %s", cites, pt)
             continue
         # Enforce <= 25 words

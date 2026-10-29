@@ -1,6 +1,7 @@
-Write the strongest case for and against owning this Indian listed company, using only the facts given (each has an id). Three points each, at most 25 words per point, each citing the ids it rests on. Points must be specific to this company, never generic ("strong management", "macro risks"). If the facts can't support three points on a side, give fewer.
+Write the strongest case for and against owning this Indian listed company, using only the facts given (each has an id). Three points each, at most 25 words per point, each citing the ids it rests on.
+Do not cite the management read summary (P_READ); cite the specific targets, promises, or numbers behind it.
+Points must be specific to this company, never generic ("strong management", "macro risks"). If the facts can't support three points on a side, give fewer.
 Return JSON: {"bull": [{"point": "...", "ids": [...]}], "bear": [...]}
 
 Facts:
 {facts_block}
-

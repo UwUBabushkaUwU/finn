@@ -1989,10 +1989,16 @@ def judge_promises_for_company(
     return result_payload, cited_sources
 
 
-def run_promises_for_ticker(ticker: str) -> dict[str, Any]:
+def run_promises_for_ticker(ticker: str, on_step: Any = None) -> dict[str, Any]:
     """Execute full promises pipeline (v3) for a ticker."""
     ticker = ticker.strip().upper()
     logger.info("Running promises evaluation (v3) for %s", ticker)
+
+    if on_step:
+        try:
+            on_step("Reading earnings calls")
+        except Exception:
+            pass
 
     # 1. Fetch transcripts
     client = get_client()
@@ -2041,6 +2047,11 @@ def run_promises_for_ticker(ticker: str) -> dict[str, Any]:
     logger.info("%s: computed %d financial numbers with covers periods", ticker, len(n_items))
 
     # Step 3: Judge with pre-filtered candidates, run-rates, milestone evaluation
+    if on_step:
+        try:
+            on_step("Checking promises against results")
+        except Exception:
+            pass
     judgement, cited_sources = judge_promises_for_company(
         ticker=ticker,
         targets=targets,
