@@ -999,6 +999,24 @@ def compute_financial_numbers(financials_row: dict[str, Any]) -> list[dict[str, 
     return n_items
 
 
+def is_vague_segment(seg: str | None) -> bool:
+    """Return True if segment is vague or unstated (e.g. 'this vertical')."""
+    if not seg:
+        return False
+    norm = seg.strip().lower()
+    return norm in {
+        "this vertical",
+        "the vertical",
+        "vertical",
+        "this business",
+        "the business",
+        "this segment",
+        "the segment",
+        "segment",
+        "business",
+    }
+
+
 def find_candidates_for_target(
     target: dict[str, Any],
     r_items: list[dict[str, Any]],
@@ -1010,11 +1028,17 @@ def find_candidates_for_target(
     Milestones use events with same segment from later calls.
     Growth targets use computed growth % items (quarterly YoY, H1, TTM, FY).
     ebitda_margin uses screener's OPM %.
+    Company-wide N items are never candidates for segment targets.
+    Vague segments ('this vertical') yield no candidates -> unverifiable.
     """
     t_metric = target.get("metric", "")
     t_seg = target.get("segment")
     t_first_date = str(target.get("first_event_date") or "")
     t_first_period = target.get("first_made_in", "")
+
+    # Vague segment with no match -> no candidates
+    if is_vague_segment(t_seg):
+        return []
 
     candidates: list[dict[str, Any]] = []
 
@@ -1041,7 +1065,7 @@ def find_candidates_for_target(
         return candidates
 
     # Case 2: Quantitative target
-    # 2a. Match in reported items (R)
+    # 2a. Match in reported items (R) with the SAME segment only
     for r in r_items:
         if r.get("metric") == t_metric:
             r_seg = r.get("segment")
@@ -1056,10 +1080,8 @@ def find_candidates_for_target(
             if seg_match:
                 candidates.append(r)
 
-    # 2b. Match in financial items (N) - whole company only, or growth targets (revenue_growth / pat_growth) without segment reported items
-    has_seg_r = any(c.get("segment") for c in candidates)
-    allow_financial_n = (t_seg is None) or (t_metric in ["revenue_growth", "pat_growth"] and not has_seg_r)
-    if allow_financial_n:
+    # 2b. Match in financial items (N) - whole company only. Never for segment targets!
+    if t_seg is None:
         t_app = normalize_period(target.get("applies_to", ""))
         for n in n_items:
             if n.get("metric") == t_metric:
@@ -1072,7 +1094,7 @@ def find_candidates_for_target(
                             candidates.append(n)
                 else:
                     candidates.append(n)
-        if not candidates and t_seg is None:
+        if not candidates:
             for n in n_items:
                 if n.get("metric") == t_metric:
                     candidates.append(n)
@@ -1393,12 +1415,14 @@ def format_override_evidence_sentence(
     
     # Format guided target
     t_target = target.get("target") or {}
-    guided_unit = "%" if is_pct else (" cr" if t_unit_norm in ["₹ cr", "cr"] else "")
+    is_currency = t_unit_norm in ["₹ cr", "cr", "inr cr"]
+    r_sym = "₹" if is_currency else ""
+    guided_unit = "%" if is_pct else (" cr" if is_currency else (f" {t_unit_norm}" if t_unit_norm else ""))
     if t_target.get("value") is not None:
         try:
             gv = float(t_target["value"])
             val_fmt = f"{gv:,.0f}" if gv >= 1000 else f"{gv:g}"
-            guided_str = f"{val_fmt}{guided_unit}"
+            guided_str = f"{r_sym}{val_fmt}{guided_unit}"
         except (ValueError, TypeError):
             guided_str = str(t_target["value"])
     elif t_target.get("low") is not None and t_target.get("high") is not None:
@@ -1407,22 +1431,23 @@ def format_override_evidence_sentence(
             hv = float(t_target["high"])
             l_fmt = f"{lv:,.0f}" if lv >= 1000 else f"{lv:g}"
             h_fmt = f"{hv:,.0f}" if hv >= 1000 else f"{hv:g}"
-            guided_str = f"{l_fmt}–{h_fmt}{guided_unit}"
+            guided_str = f"{r_sym}{l_fmt}–{r_sym}{h_fmt}{guided_unit}"
         except (ValueError, TypeError):
-            guided_str = f"{low_f:g}–{high_f:g}{guided_unit}"
+            guided_str = f"{r_sym}{low_f:g}–{r_sym}{high_f:g}{guided_unit}"
     else:
         l_fmt = f"{low_f:,.0f}" if low_f >= 1000 else f"{low_f:g}"
         h_fmt = f"{high_f:,.0f}" if high_f >= 1000 else f"{high_f:g}"
-        guided_str = f"{l_fmt}–{h_fmt}{guided_unit}"
+        guided_str = f"{r_sym}{l_fmt}–{r_sym}{h_fmt}{guided_unit}"
         
     if is_pct:
-        val_str = f"{effective_val:.1f}%" if round(effective_val, 1) != round(effective_val) else f"{int(effective_val)}%"
+        val_str = f"{effective_val:.1f}%"
         return f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
     else:
+        u_suffix = " cr" if is_currency else (f" {t_unit_norm}" if t_unit_norm else "")
         if multiplier > 1.0:
-            return f"{covers} {metric_name} run-rate {effective_val:,.0f} cr ({eid_str}) vs {guided_str} guided"
+            return f"{covers} {metric_name} at current run-rate: {r_sym}{effective_val:,.0f}{u_suffix} ({eid_str}) vs {guided_str} guided"
         else:
-            return f"{covers} {metric_name} {effective_val:,.0f} cr ({eid_str}) vs {guided_str} guided"
+            return f"{covers} {metric_name} {r_sym}{effective_val:,.0f}{u_suffix} ({eid_str}) vs {guided_str} guided"
 
 
 def apply_python_overrides_and_runrates(
@@ -1725,7 +1750,18 @@ def judge_promises_for_company(
         elif not cands:
             # Zero candidates -> Python sets verdict with NO LLM call
             period_ended = has_period_ended(t.get("applies_to", ""), latest_quarter)
-            if not period_ended:
+            t_seg = t.get("segment")
+            if is_vague_segment(t_seg):
+                v_status = "unverifiable"
+                ev_str = f"vague segment ('{t_seg}') with no matching reported data"
+            elif t_seg is not None:
+                if not period_ended:
+                    v_status = "pending"
+                    ev_str = f"no reported data for segment '{t_seg}' in subsequent calls yet"
+                else:
+                    v_status = "unverifiable"
+                    ev_str = f"no reported data for segment '{t_seg}' in subsequent calls"
+            elif not period_ended:
                 v_status = "pending"
                 ev_str = "period running; no candidate figure or update in later calls yet"
             else:
@@ -1810,11 +1846,11 @@ def judge_promises_for_company(
 
     # Executive read generated after overrides via small bulk call
     verdict_lines = [
-        f"- [{v['id']}] {v['promise']} ({v['applies_to']}): {v['verdict']} [Rev: {v.get('revision_label', 'none')}] — {v.get('evidence', '')}"
+        f"- {v['promise']} ({v['applies_to']}): {v['verdict']} [Rev: {v.get('revision_label', 'none')}] — {v.get('evidence', '')}"
         for v in all_verdicts
     ]
     verdicts_summary = "\n".join(verdict_lines)
-    read_template_path = Path(__file__).resolve().parent / "prompts" / "read_v2.txt"
+    read_template_path = Path(__file__).resolve().parent / "prompts" / "read_v3.txt"
     if read_template_path.exists():
         read_template = read_template_path.read_text(encoding="utf-8")
     else:
@@ -1827,7 +1863,7 @@ def judge_promises_for_company(
     read_resp = call_json(
         task="bulk",
         prompt=read_prompt,
-        prompt_version="read_v2",
+        prompt_version="read_v3",
         use_cache=True,
     )
     read_text = read_resp.get("read", "") if isinstance(read_resp, dict) else ""

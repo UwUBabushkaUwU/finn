@@ -59,3 +59,4 @@ export function NoResearchState({ ticker, company }: NoResearchStateProps) {
     </div>
   );
 }
+

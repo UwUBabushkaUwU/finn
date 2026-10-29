@@ -8,6 +8,7 @@ import {
   formatVerdictChip,
   getPromiseSortPriority,
   findDocumentUrl,
+  cleanEvidenceText,
 } from "@/lib/company";
 
 interface PromiseListProps {
@@ -100,9 +101,6 @@ export function PromiseList({ verdicts, sources = [], meta, initialExpandedId }:
         <div className="flex items-start justify-between gap-2">
           <div className="space-y-0.5 min-w-0 flex-1">
             <div className="flex items-baseline gap-1.5 flex-wrap">
-              <span className="text-[11px] font-mono font-bold text-neutral-400 dark:text-neutral-500">
-                {v.id}
-              </span>
               <span className="text-xs text-neutral-500 dark:text-neutral-400 font-mono">
                 said in {v.made_in || src?.period || "earlier call"}
               </span>
@@ -133,7 +131,7 @@ export function PromiseList({ verdicts, sources = [], meta, initialExpandedId }:
         {/* Evidence line */}
         <div className="text-xs text-neutral-600 dark:text-neutral-400 font-mono leading-relaxed pt-0.5">
           <span className="text-neutral-400 dark:text-neutral-500 select-none mr-1.5">↳</span>
-          {v.evidence}
+          {cleanEvidenceText(v.evidence)}
         </div>
 
         {/* Expanded View */}
@@ -242,3 +240,4 @@ export function PromiseList({ verdicts, sources = [], meta, initialExpandedId }:
     </section>
   );
 }
+

@@ -128,7 +128,12 @@ export default async function CompanyPage({ params }: PageProps) {
         <BusinessSnapshot snapshot={snapshot} meta={meta} />
 
         {/* Bull vs Bear Case */}
-        <BullBearSection bullBear={bullBear} />
+        <BullBearSection
+          bullBear={bullBear}
+          promises={promises}
+          numbers={numbers}
+          snapshot={snapshot}
+        />
 
         {/* Sources disclosure & FINN methodology notice */}
         <SourcesSection meta={meta} />
@@ -143,3 +148,4 @@ export default async function CompanyPage({ params }: PageProps) {
     </main>
   );
 }
+

@@ -145,3 +145,4 @@ export function BusinessSnapshot({ snapshot, meta }: BusinessSnapshotProps) {
     </section>
   );
 }
+

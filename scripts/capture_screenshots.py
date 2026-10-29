@@ -17,64 +17,47 @@ def main():
     driver.set_window_size(375, 812)
 
     try:
-        # 1. /c/DIXON (whole page, dark mode)
+        # Load DIXON in dark mode
         print("Navigating to /c/DIXON...")
         driver.get("http://localhost:3000/c/DIXON")
         time.sleep(2)
-
-        # Force dark mode
         driver.execute_script("document.documentElement.classList.add('dark'); document.documentElement.classList.remove('light');")
         time.sleep(0.5)
 
-        # Get total scroll height for whole page screenshot
-        total_height = driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
-        print(f"DIXON scroll height: {total_height}")
-        driver.set_window_size(375, total_height + 50)
-        time.sleep(1)
+        # 1. DIXON Promise List
+        print("Capturing DIXON Promise List...")
+        promise_section = driver.find_element(By.CSS_SELECTOR, "section[aria-labelledby='promise-list-heading']")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", promise_section)
+        time.sleep(0.5)
+        promise_path = os.path.abspath("docs/screenshots/dixon_promise_list.png")
+        promise_section.screenshot(promise_path)
+        print(f"Saved: {promise_path}")
 
+        # 2. DIXON Numbers Section
+        print("Capturing DIXON Numbers Section...")
+        numbers_section = driver.find_element(By.CSS_SELECTOR, "section[aria-labelledby='numbers-heading']")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", numbers_section)
+        time.sleep(0.5)
+        numbers_path = os.path.abspath("docs/screenshots/dixon_numbers.png")
+        numbers_section.screenshot(numbers_path)
+        print(f"Saved: {numbers_path}")
+
+        # 3. DIXON Bull vs Bear Section
+        print("Capturing DIXON Bull vs Bear Section...")
+        bull_bear_section = driver.find_element(By.CSS_SELECTOR, "section[aria-labelledby='bull-bear-heading']")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'start'});", bull_bear_section)
+        time.sleep(0.5)
+        bull_bear_path = os.path.abspath("docs/screenshots/dixon_bull_bear.png")
+        bull_bear_section.screenshot(bull_bear_path)
+        print(f"Saved: {bull_bear_path}")
+
+        # Also update whole page screenshots
+        total_height = driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
+        driver.set_window_size(375, total_height + 50)
+        time.sleep(0.5)
         dixon_whole_path = os.path.abspath("docs/screenshots/dixon_dark_whole.png")
         driver.save_screenshot(dixon_whole_path)
         print(f"Saved: {dixon_whole_path}")
-
-        # 2. Expanded promise T12 in /c/DIXON (375 px)
-        # Reset window size to standard phone height
-        driver.set_window_size(375, 812)
-        driver.get("http://localhost:3000/c/DIXON#T12")
-        time.sleep(2)
-        driver.execute_script("document.documentElement.classList.add('dark'); document.documentElement.classList.remove('light');")
-
-        # Ensure T12 is expanded
-        t12_el = driver.find_element(By.ID, "T12")
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", t12_el)
-        time.sleep(0.5)
-
-        # If not expanded, click it
-        is_expanded = driver.execute_script("return arguments[0].querySelector('blockquote') !== null;", t12_el)
-        if not is_expanded:
-            t12_el.click()
-            time.sleep(0.5)
-
-        dixon_t12_path = os.path.abspath("docs/screenshots/dixon_t12_expanded.png")
-        driver.save_screenshot(dixon_t12_path)
-        print(f"Saved: {dixon_t12_path}")
-
-        # 3. /c/BAJFINANCE (light mode)
-        print("Navigating to /c/BAJFINANCE...")
-        driver.get("http://localhost:3000/c/BAJFINANCE")
-        time.sleep(2)
-
-        # Force light mode
-        driver.execute_script("document.documentElement.classList.remove('dark'); document.documentElement.classList.add('light');")
-        time.sleep(0.5)
-
-        baj_height = driver.execute_script("return Math.max(document.body.scrollHeight, document.documentElement.scrollHeight);")
-        print(f"BAJFINANCE scroll height: {baj_height}")
-        driver.set_window_size(375, baj_height + 50)
-        time.sleep(1)
-
-        baj_path = os.path.abspath("docs/screenshots/bajfinance_light.png")
-        driver.save_screenshot(baj_path)
-        print(f"Saved: {baj_path}")
 
     finally:
         driver.quit()

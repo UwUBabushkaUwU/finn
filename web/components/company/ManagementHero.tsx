@@ -146,3 +146,4 @@ export function ManagementHero({ promises }: ManagementHeroProps) {
     </section>
   );
 }
+

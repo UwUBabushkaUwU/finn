@@ -66,7 +66,12 @@ export interface NumbersSection {
   basis?: string;
   is_lender?: boolean;
   snapshot?: {
-    ttm_pat?: { value?: number | null; unit?: string; source?: Record<string, unknown> };
+    ttm_pat?: {
+      value?: number | null;
+      unit?: string;
+      yoy_growth_pct?: number | null;
+      source?: Record<string, unknown>;
+    };
     ttm_revenue?: { value?: number | null; unit?: string; source?: Record<string, unknown> };
     latest_quarter_pat?: {
       value?: number | null;
@@ -250,6 +255,51 @@ export interface RevisedGuidance {
   }>;
 }
 
+export function cleanEvidenceText(evidence?: string): string {
+  if (!evidence) return "";
+  let text = evidence;
+
+  // 1. Strip internal IDs in parentheses like (N173), (R1, N32), (R15), (IDs: ['R20']), etc.
+  text = text.replace(/\s*\((?:IDs:[^)]*|[A-Z]\d+(?:\s*,\s*[A-Z]\d+)*)\)/gi, "");
+  text = text.replace(/\s*\([A-Z]\d+\)/g, "");
+  text = text.replace(/\s*citing\s+[A-Z]\d+\b/gi, "");
+
+  // 2. Prepend ₹ on every amount in cr/crores if missing
+  // E.g. "56,000 cr" -> "₹56,000 cr", "1,200–1,300 cr" -> "₹1,200–₹1,300 cr"
+  text = text.replace(/(?<![₹$])\b(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:cr|crores)\b/gi, "₹$1 cr");
+  text = text.replace(/(?<![₹$])\b(\d+(?:,\d+)*)–(?<![₹$])(\d+(?:,\d+)*)\s*(?:cr|crores)\b/gi, "₹$1–₹$2 cr");
+
+  // 3. Ensure "at current run-rate" on run-rate evidence
+  if (/\brun-rate\b/i.test(text) && !/at current run-rate/i.test(text)) {
+    text = text.replace(/\b(?:revenue\s+)?run-rate(?:\s+is)?/gi, "revenue at current run-rate:");
+  }
+
+  // 4. Format percentages to 1 decimal if they have 2+ decimals
+  text = text.replace(/(\d+\.\d{2,})%/g, (_, num) => `${parseFloat(num).toFixed(1)}%`);
+
+  // 5. Clean up whitespace
+  text = text.replace(/\s+/g, " ").trim();
+  text = text.replace(/\s+([.,;:])/g, "$1");
+
+  return text;
+}
+
+function formatGuidanceUnits(val: string): string {
+  let s = val.trim();
+
+  // Unit replacements
+  s = s.replace(/(\d+)units\b/gi, "$1 mn units");
+  s = s.replace(/(\d+)stores\b/gi, "$1 stores");
+  s = s.replace(/(\d+)\$/g, "$$$1B");
+  s = s.replace(/(\d+)x\b/gi, "$1×");
+
+  // Currency
+  s = s.replace(/(?<![₹$])\b(\d+(?:,\d+)*(?:\.\d+)?)\s*(?:cr|crores)\b/gi, "₹$1 cr");
+  s = s.replace(/(\d+)\s*–\s*(\d+)₹\s*cr/gi, "₹$1–$2 cr");
+
+  return s;
+}
+
 export function parseRevisedTimeline(timelineList: string[]): RevisedGuidance[] {
   const revised: RevisedGuidance[] = [];
 
@@ -276,13 +326,21 @@ export function parseRevisedTimeline(timelineList: string[]): RevisedGuidance[] 
     for (const part of parts) {
       // Expected format: "26–27% (Q2 FY27)" or "Expect something. (Q4 FY26)"
       const match = part.match(/^(.*?)(?:\s*\((Q[1-4]\s+FY\d{2,4}|FY\d{2,4})\))?$/i);
-      if (match) {
-        const val = match[1]?.trim() || part;
-        const qtr = match[2]?.trim() || "";
-        steps.push({ value: val, quarter: qtr });
-      } else {
-        steps.push({ value: part, quarter: "" });
+      const val = match ? match[1]?.trim() : part;
+      const qtr = match ? match[2]?.trim() || "" : "";
+
+      // Only include numeric values (contains digits)
+      if (val && /\d/.test(val)) {
+        steps.push({
+          value: formatGuidanceUnits(val),
+          quarter: qtr,
+        });
       }
+    }
+
+    // Rule: ONLY chains of 2+ numeric values of the same metric, segment and period. Otherwise hide.
+    if (steps.length < 2) {
+      continue;
     }
 
     // Beautify metric label e.g. "FY27 revenue_growth" -> "FY27 revenue growth"

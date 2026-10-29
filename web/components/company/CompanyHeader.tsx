@@ -92,3 +92,4 @@ export function CompanyHeader({ ticker, company, meta, price }: CompanyHeaderPro
     </header>
   );
 }
+

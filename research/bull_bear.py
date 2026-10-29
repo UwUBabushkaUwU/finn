@@ -85,16 +85,16 @@ def build_facts_catalog(
         rev_l = snap.get("latest_quarter_revenue")
         if rev_l:
             fid = "N_REV_LATEST"
-            yoy = f", YoY: {rev_l.get('yoy_growth_pct'):+.2f}%" if rev_l.get("yoy_growth_pct") is not None else ""
-            text = f"Latest quarter revenue ({rev_l.get('quarter')}): ₹{rev_l.get('value'):,.0f} cr{yoy}"
+            yoy = f", {rev_l.get('yoy_growth_pct'):+.1f}% YoY" if rev_l.get("yoy_growth_pct") is not None else ""
+            text = f"{rev_l.get('quarter')} qtr revenue: ₹{rev_l.get('value'):,.0f} cr{yoy}"
             catalog[fid] = text
             lines.append(f"- [{fid}] {text}")
 
         pat_l = snap.get("latest_quarter_pat")
         if pat_l:
             fid = "N_PAT_LATEST"
-            yoy = f", YoY: {pat_l.get('yoy_growth_pct'):+.2f}%" if pat_l.get("yoy_growth_pct") is not None else ""
-            text = f"Latest quarter PAT ({pat_l.get('quarter')}): ₹{pat_l.get('value'):,.0f} cr{yoy}"
+            yoy = f", {pat_l.get('yoy_growth_pct'):+.1f}% YoY" if pat_l.get("yoy_growth_pct") is not None else ""
+            text = f"{pat_l.get('quarter')} qtr: ₹{pat_l.get('value'):,.0f} cr{yoy}"
             catalog[fid] = text
             lines.append(f"- [{fid}] {text}")
 
@@ -115,7 +115,8 @@ def build_facts_catalog(
         ttm_p = snap.get("ttm_pat")
         if ttm_p and ttm_p.get("value") is not None:
             fid = "N_TTM_PAT"
-            text = f"TTM PAT: ₹{ttm_p.get('value'):,.0f} cr"
+            yoy = f", {ttm_p.get('yoy_growth_pct'):+.1f}% YoY vs prior TTM" if ttm_p.get("yoy_growth_pct") is not None else ""
+            text = f"TTM PAT: ₹{ttm_p.get('value'):,.0f} cr{yoy}"
             catalog[fid] = text
             lines.append(f"- [{fid}] {text}")
 

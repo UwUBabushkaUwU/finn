@@ -215,24 +215,46 @@ def compute_numbers_for_ticker(ticker: str) -> dict[str, Any]:
                 "source": {"table": "quarterly_results", "columns": q_cols[-4:]},
             }
 
-    # TTM PAT
+    # TTM PAT & TTM PAT YoY
+    ttm_pat_val = None
+    ttm_pat_source = None
+    ttm_pat_yoy = None
+
     if ttm_col_idx is not None and pl_pat_match:
         _, pl_p_vals = pl_pat_match
         if ttm_col_idx < len(pl_p_vals) and pl_p_vals[ttm_col_idx] is not None:
-            snapshot["ttm_pat"] = {
-                "value": float(pl_p_vals[ttm_col_idx]),
-                "unit": "₹ cr",
-                "source": {"table": "profit_loss", "column": "TTM"},
-            }
-    elif q_pat_match and len(q_cols) >= 4:
+            ttm_pat_val = float(pl_p_vals[ttm_col_idx])
+            ttm_pat_source = {"table": "profit_loss", "column": "TTM"}
+            if ttm_col_idx >= 1 and pl_p_vals[ttm_col_idx - 1] is not None:
+                prior_annual = float(pl_p_vals[ttm_col_idx - 1])
+                if prior_annual != 0:
+                    ttm_pat_yoy = ((ttm_pat_val - prior_annual) / abs(prior_annual)) * 100.0
+
+    if ttm_pat_val is None and q_pat_match and len(q_cols) >= 4:
         _, q_p_vals = q_pat_match
         last_4_vals = q_p_vals[-4:]
         if all(v is not None for v in last_4_vals):
-            snapshot["ttm_pat"] = {
-                "value": sum(float(v) for v in last_4_vals),
-                "unit": "₹ cr",
-                "source": {"table": "quarterly_results", "columns": q_cols[-4:]},
-            }
+            ttm_pat_val = sum(float(v) for v in last_4_vals)
+            ttm_pat_source = {"table": "quarterly_results", "columns": q_cols[-4:]}
+
+    # If quarterly results has >= 8 quarters, compute exact TTM YoY comparing the 4 quarters vs the 4 quarters prior
+    if q_pat_match and len(q_cols) >= 8:
+        _, q_p_vals = q_pat_match
+        curr_4 = q_p_vals[-4:]
+        prior_4 = q_p_vals[-8:-4]
+        if all(v is not None for v in curr_4) and all(v is not None for v in prior_4):
+            c_sum = sum(float(v) for v in curr_4)
+            p_sum = sum(float(v) for v in prior_4)
+            if p_sum != 0:
+                ttm_pat_yoy = ((c_sum - p_sum) / abs(p_sum)) * 100.0
+
+    if ttm_pat_val is not None:
+        snapshot["ttm_pat"] = {
+            "value": ttm_pat_val,
+            "unit": "₹ cr",
+            "yoy_growth_pct": round(ttm_pat_yoy, 1) if ttm_pat_yoy is not None else None,
+            "source": ttm_pat_source or {"table": "profit_loss", "column": "TTM"},
+        }
 
     # -------------------------------------------------------------
     # 2. Trajectory
@@ -564,6 +586,57 @@ def compute_numbers_for_ticker(ticker: str) -> dict[str, Any]:
                         "change": increase,
                     },
                 })
+
+    # Rule 5: Profit grew far faster than operations
+    # latest-quarter PAT YoY exceeds revenue YoY by 50+ points while operating margin fell YoY
+    if is_lender:
+        flags.append({
+            "flag": "profit_grew_far_faster_than_operations",
+            "triggered": False,
+            "note": "lender: different metrics",
+        })
+    else:
+        pat_snap = snapshot.get("latest_quarter_pat") or {}
+        rev_snap = snapshot.get("latest_quarter_revenue") or {}
+        pat_y = pat_snap.get("yoy_growth_pct")
+        rev_y = rev_snap.get("yoy_growth_pct")
+
+        latest_opm_val = None
+        prior_opm_val = None
+        opm_drop_yoy = None
+        if q_opm_match and len(q_cols) >= 5:
+            _, opm_vals = q_opm_match
+            if latest_q_idx < len(opm_vals) and (latest_q_idx - 4) < len(opm_vals):
+                if opm_vals[latest_q_idx] is not None and opm_vals[latest_q_idx - 4] is not None:
+                    latest_opm_val = float(opm_vals[latest_q_idx])
+                    prior_opm_val = float(opm_vals[latest_q_idx - 4])
+                    opm_drop_yoy = latest_opm_val - prior_opm_val
+
+        is_50_plus = bool(pat_y is not None and rev_y is not None and (pat_y - rev_y) >= 50.0)
+        margin_fell = bool(opm_drop_yoy is not None and opm_drop_yoy < 0)
+        trig = bool(is_50_plus and margin_fell)
+
+        if pat_y is not None and rev_y is not None and latest_opm_val is not None and prior_opm_val is not None:
+            spread = pat_y - rev_y
+            detail_str = (
+                f"Profit grew far faster than operations: latest-quarter PAT YoY ({pat_y:+.1f}%) "
+                f"exceeds revenue YoY ({rev_y:+.1f}%) by {spread:.1f} points while operating margin fell YoY "
+                f"({latest_opm_val:.1f}% vs {prior_opm_val:.1f}%). Check other income or one-off items in the results."
+            )
+            flags.append({
+                "flag": "profit_grew_far_faster_than_operations",
+                "triggered": trig,
+                "note": "check other income or one-off items in the results",
+                "details": detail_str,
+                "numbers": {
+                    "pat_yoy": pat_y,
+                    "revenue_yoy": rev_y,
+                    "spread_points": round(spread, 1),
+                    "latest_operating_margin": latest_opm_val,
+                    "prior_operating_margin": prior_opm_val,
+                    "margin_change_points": round(opm_drop_yoy, 1) if opm_drop_yoy is not None else None,
+                },
+            })
 
     result_data = {
         "basis": basis,

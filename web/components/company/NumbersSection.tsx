@@ -16,10 +16,11 @@ export function NumbersSection({ numbers, financials }: NumbersSectionProps) {
   const ttmRevVal = snap?.ttm_revenue?.value;
   const ttmRevStr = ttmRevVal != null ? `₹${ttmRevVal.toLocaleString("en-IN")} cr` : "—";
 
-  // 2. Tile 2: TTM PAT with YoY
+  // 2. Tile 2: TTM PAT (with YoY vs prior TTM)
   const ttmPatVal = snap?.ttm_pat?.value;
   const ttmPatStr = ttmPatVal != null ? `₹${ttmPatVal.toLocaleString("en-IN")} cr` : "—";
-  const patYoY = snap?.latest_quarter_pat?.yoy_growth_pct;
+  const ttmPatYoY = snap?.ttm_pat?.yoy_growth_pct;
+  const latestQuarterPat = snap?.latest_quarter_pat;
 
   // 3. Tile 3: Operating margin (latest)
   const opmVal = snap?.latest_operating_margin?.value;
@@ -131,31 +132,34 @@ export function NumbersSection({ numbers, financials }: NumbersSectionProps) {
           </div>
         </div>
 
-        {/* Tile 2: TTM PAT (with YoY) */}
+        {/* Tile 2: TTM PAT (with YoY vs prior TTM) */}
         <div
           id="N_TTM_PAT"
           className="p-2.5 rounded border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-900/90 space-y-1"
         >
           <div className="text-[10px] font-mono uppercase tracking-wider text-neutral-500 dark:text-neutral-400 flex items-center justify-between">
             <span>TTM PAT</span>
-            {patYoY != null && (
+            {ttmPatYoY != null && (
               <span
-                id="N_PAT_LATEST"
                 className={`text-[10px] font-mono font-semibold ${
-                  patYoY >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"
+                  ttmPatYoY >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"
                 }`}
               >
-                {patYoY >= 0 ? "+" : ""}
-                {patYoY.toFixed(1)}% YoY
+                {ttmPatYoY >= 0 ? "+" : ""}
+                {ttmPatYoY.toFixed(1)}% YoY
               </span>
             )}
           </div>
           <div className="text-base font-mono font-bold text-neutral-950 dark:text-neutral-50 tabular-nums">
             {ttmPatStr}
           </div>
-          <div className="text-[10px] font-mono text-neutral-400 dark:text-neutral-500">
-            {snap?.latest_quarter_pat?.quarter
-              ? `${snap.latest_quarter_pat.quarter}: ₹${snap.latest_quarter_pat.value?.toLocaleString("en-IN")} cr`
+          <div id="N_PAT_LATEST" className="text-[10px] font-mono text-neutral-500 dark:text-neutral-400 leading-snug">
+            {latestQuarterPat?.quarter
+              ? `${latestQuarterPat.quarter} qtr: ₹${latestQuarterPat.value?.toLocaleString("en-IN")} cr, ${
+                  latestQuarterPat.yoy_growth_pct != null
+                    ? `${latestQuarterPat.yoy_growth_pct >= 0 ? "+" : ""}${latestQuarterPat.yoy_growth_pct.toFixed(1)}% YoY`
+                    : ""
+                }`
               : "Consolidated"}
           </div>
         </div>
@@ -287,24 +291,24 @@ export function NumbersSection({ numbers, financials }: NumbersSectionProps) {
                 />
               ))}
 
-              {/* Label Latest Bar Value */}
+              {/* Label Latest Bar Value - strictly inside right edge */}
               {latestBar && (
                 <text
-                  x={latestBar.x + latestBar.width / 2}
-                  y={Math.max(12, latestBar.y - 4)}
-                  textAnchor="middle"
+                  x={plotRight}
+                  y={Math.max(13, latestBar.y - 4)}
+                  textAnchor="end"
                   className="text-[9px] font-mono fill-neutral-700 dark:fill-neutral-300 font-bold"
                 >
                   ₹{Math.round(latestBar.rev).toLocaleString("en-IN")} cr
                 </text>
               )}
 
-              {/* Label Latest Line Value */}
+              {/* Label Latest Line Value - strictly inside right edge */}
               {latestPoint && (
                 <text
-                  x={Math.min(svgWidth - 16, latestPoint.x + 4)}
-                  y={latestPoint.y - 4}
-                  textAnchor="start"
+                  x={plotRight}
+                  y={Math.max(25, latestPoint.y - 4)}
+                  textAnchor="end"
                   className="text-[9px] font-mono fill-amber-700 dark:fill-amber-400 font-bold"
                 >
                   {latestPoint.margin.toFixed(1)}%
@@ -377,3 +381,4 @@ export function NumbersSection({ numbers, financials }: NumbersSectionProps) {
     </section>
   );
 }
+
