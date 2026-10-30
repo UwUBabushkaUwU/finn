@@ -104,6 +104,26 @@ def normalize_segment(seg: Any) -> str | None:
     return s if s else None
 
 
+def normalize_segment_for_matching(seg: Any) -> str | None:
+    """Normalize business segment name for exact matching:
+    lowercase, drop '&', 'and', 'business', 'segment', 'division', 'products', 'product',
+    and strip punctuation and excess whitespace.
+    """
+    if not seg:
+        return None
+    s = str(seg).strip().lower()
+    if s in ["null", "none", "overall", "consolidated", "consol", "company", "total", "entire company"]:
+        return None
+    # Strip punctuation
+    s = re.sub(r"[&,;:/\(\)\-\.\+]", " ", s)
+    tokens = [
+        w for w in s.split()
+        if w not in {"&", "and", "business", "segment", "division", "products", "product", "the", "this"}
+    ]
+    cleaned = " ".join(tokens).strip()
+    return cleaned if cleaned else None
+
+
 def normalize_metric(metric: str, hint: str = "") -> str:
     """Normalize metric name strictly to one of ALLOWED_METRICS."""
     h = hint.lower()
@@ -457,7 +477,12 @@ def clean_money_in_evidence_text(text: str) -> str:
     # 9. Fix broken Indian comma formatting like '1,₹600' -> '₹1,600'
     text = re.sub(r"(\d+)\s*,\s*₹\s*(\d+)", r"₹\1,\2", text)
 
-    # 10. Normalize spaces
+    # 10. Fix 'run-rate: of ₹' or 'run-rate of ₹'
+    text = re.sub(r"\brun-rate:\s*of\s*₹", "run-rate: ₹", text, flags=re.IGNORECASE)
+    text = re.sub(r"\brun-rate\s+of\s*₹", "run-rate: ₹", text, flags=re.IGNORECASE)
+    text = re.sub(r"\brun-rate:\s*of\b", "run-rate:", text, flags=re.IGNORECASE)
+
+    # 11. Normalize spaces
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\s+([.,;:!?)])", r"\1", text)
     return text
@@ -1023,24 +1048,111 @@ def group_targets_and_build_timeline(
         }
         consolidated_targets.append(t_obj)
 
-        # Only include in timeline_entries if 2+ items AND values actually changed
-        values_set = set()
-        for it in items_sorted:
-            td = it.get("target") or {}
-            v = td.get("value") or (f"{td.get('low')}-{td.get('high')}" if td.get("low") is not None else None)
-            if v is not None:
-                values_set.add(str(v).strip().lower())
+        # Guidance timeline: only numeric metrics (never milestone), all values in one unit, sensible scaling
+        if metric != "milestone" and len(items_sorted) >= 2:
+            def get_step_unit(it_tgt: dict[str, Any]) -> str:
+                u = str(it_tgt.get("unit") or "").strip().lower()
+                if "bps" in u or "basis" in u:
+                    return "bps"
+                if "%" in u:
+                    return "%"
+                if "cr" in u or "crore" in u:
+                    return "cr"
+                if "store" in u or "branch" in u:
+                    return "stores"
+                if "mn" in u or "million" in u:
+                    return "mn units"
+                if "unit" in u:
+                    return "units"
+                return u
 
-        has_actual_change = len(values_set) >= 2 or revision_label in ["raised", "cut", "widened", "narrowed"]
+            # Count units
+            unit_counts: dict[str, int] = {}
+            for it in items_sorted:
+                u_norm = get_step_unit(it.get("target") or {})
+                if u_norm:
+                    unit_counts[u_norm] = unit_counts.get(u_norm, 0) + 1
 
-        if len(items_sorted) >= 2 and has_actual_change:
-            timeline_entries.append({
-                "metric": metric,
-                "segment": segment,
-                "applies_to": applies_to,
-                "evolution": evolution_str,
-                "items": items_sorted,
-            })
+            # Default or dominant unit
+            dominant_unit = max(unit_counts.keys(), key=lambda k: unit_counts[k]) if unit_counts else ""
+            if not dominant_unit and target_unit:
+                dominant_unit = get_step_unit({"unit": target_unit})
+
+            # Filter items to only those sharing dominant_unit (all values in one unit)
+            timeline_items = []
+            for it in items_sorted:
+                u_norm = get_step_unit(it.get("target") or {})
+                if not u_norm or u_norm == dominant_unit:
+                    timeline_items.append(it)
+
+            # Build timeline steps with sensible scaling
+            tl_steps = []
+            values_set = set()
+            for it in timeline_items:
+                td = it.get("target") or {}
+                val = td.get("value")
+                low = td.get("low")
+                high = td.get("high")
+
+                def format_num_sensibly(num_val: Any) -> str:
+                    try:
+                        n = float(num_val)
+                    except (ValueError, TypeError):
+                        return str(num_val)
+                    if dominant_unit == "%":
+                        return f"{n:g}%"
+                    if dominant_unit == "bps":
+                        return f"{int(round(n))} bps"
+                    if dominant_unit == "cr":
+                        return f"₹{format_indian_number(round(n, 1))} cr"
+                    if dominant_unit == "stores":
+                        return f"{int(round(n))} stores"
+                    if n >= 1_000_000:
+                        return f"{n / 1_000_000:g} mn units"
+                    if dominant_unit in ("mn units", "units"):
+                        return f"{n:g} {dominant_unit}"
+                    return f"{n:g}"
+
+                step_val_str = ""
+                if val is not None:
+                    step_val_str = format_num_sensibly(val)
+                    values_set.add(str(val).strip().lower())
+                elif low is not None and high is not None:
+                    try:
+                        ln = float(low)
+                        hn = float(high)
+                        if dominant_unit == "%":
+                            step_val_str = f"{ln:g}–{hn:g}%"
+                        elif dominant_unit == "bps":
+                            step_val_str = f"{int(round(ln))}–{int(round(hn))} bps"
+                        elif dominant_unit == "cr":
+                            step_val_str = f"₹{format_indian_number(round(ln, 1))}–{format_indian_number(round(hn, 1))} cr"
+                        elif dominant_unit == "stores":
+                            step_val_str = f"{int(round(ln))}–{int(round(hn))} stores"
+                        elif hn >= 1_000_000:
+                            step_val_str = f"{ln / 1_000_000:g}–{hn / 1_000_000:g} mn units"
+                        else:
+                            u_suffix = f" {dominant_unit}" if dominant_unit else ""
+                            step_val_str = f"{ln:g}–{hn:g}{u_suffix}"
+                    except (ValueError, TypeError):
+                        step_val_str = f"{low}–{high}"
+                    values_set.add(f"{low}-{high}".strip().lower())
+
+                if step_val_str:
+                    qtr = it.get("period_made", "")
+                    tl_steps.append(f"{step_val_str} ({qtr})" if qtr else step_val_str)
+
+            has_actual_change = len(values_set) >= 2 or revision_label in ["raised", "cut", "widened", "narrowed"]
+
+            if len(tl_steps) >= 2 and has_actual_change:
+                clean_evolution_str = f"{seg_prefix}{applies_to} {metric}: " + " → ".join(tl_steps)
+                timeline_entries.append({
+                    "metric": metric,
+                    "segment": segment,
+                    "applies_to": applies_to,
+                    "evolution": clean_evolution_str,
+                    "items": timeline_items,
+                })
         target_idx += 1
 
     return consolidated_targets, timeline_entries
@@ -1360,6 +1472,7 @@ def find_candidates_for_target(
     # Case 1: Milestone target
     if t_metric == "milestone":
         t_stmt = target.get("statement", "")
+        norm_t = normalize_segment_for_matching(t_seg)
         for e in events:
             e_what = e.get("what") or ""
             overlap = compute_milestone_overlap(t_stmt, e_what)
@@ -1367,9 +1480,15 @@ def find_candidates_for_target(
                 continue
 
             e_seg = e.get("segment")
-            seg_match = (t_seg is not None and e_seg == t_seg) or (t_seg is not None and t_seg in e_what.lower())
+            norm_e = normalize_segment_for_matching(e_seg)
+            if norm_t is None and norm_e is None:
+                seg_match = True
+            elif norm_t is not None and norm_e is not None:
+                seg_match = (norm_t == norm_e)
+            else:
+                seg_match = False
 
-            if seg_match or t_seg is None:
+            if seg_match:
                 e_date = str(e.get("event_date") or "")
                 e_period = e.get("period_reported", "")
                 if (e_date and t_first_date and e_date > t_first_date) or (e_period != t_first_period):
@@ -1378,29 +1497,36 @@ def find_candidates_for_target(
 
     # Case 2: Quantitative target
     t_applies_to = target.get("applies_to", "")
+    norm_t = normalize_segment_for_matching(t_seg)
 
     # 2a. Match in reported items (R) with the SAME segment only and period falls inside applies_to
     for r in r_items:
-        if r.get("metric") == t_metric:
+        r_metric = r.get("metric")
+        if r_metric == t_metric:
+            # Metric guard: aum_growth targets may only use aum_growth evidence, never revenue growth
+            if t_metric == "aum_growth" and r_metric != "aum_growth":
+                continue
+
             r_cov = r.get("covers") or r.get("period") or ""
             if not period_falls_inside(r_cov, t_applies_to):
                 continue
 
-            r_seg = r.get("segment")
-            seg_match = False
-            if t_seg is None and r_seg is None:
+            # Exact segment matching after normalising: No fuzzy token overlap.
+            norm_r = normalize_segment_for_matching(r.get("segment"))
+            if norm_t is None and norm_r is None:
                 seg_match = True
-            elif t_seg is not None and r_seg is not None:
-                t_words = set(t_seg.lower().split())
-                r_words = set(r_seg.lower().split())
-                if t_seg.lower() in r_seg.lower() or r_seg.lower() in t_seg.lower() or bool(t_words & r_words):
-                    seg_match = True
+            elif norm_t is not None and norm_r is not None:
+                seg_match = (norm_t == norm_r)
+            else:
+                seg_match = False
+
             if seg_match:
                 candidates.append(r)
 
     # 2b. Match in financial items (N) - whole company only. Never for segment targets!
     # Evidence covers period must fall inside target's applies_to.
-    if t_seg is None:
+    # Metric guard: aum_growth targets may only use aum_growth evidence, never revenue growth or financials N items!
+    if t_seg is None and t_metric != "aum_growth":
         for n in n_items:
             if n.get("metric") == t_metric:
                 n_cov = n.get("covers", "")
@@ -1532,10 +1658,12 @@ def evaluate_future_multiyear_target(
         cited_ids = []
 
         # 1. Look for candidate reported items matching metric, unit == "%", and segment
+        norm_t = normalize_segment_for_matching(t_seg)
         for r in r_items:
             r_seg = r.get("segment")
             if r.get("metric") == t_metric and r.get("unit") == "%" and r.get("value") is not None:
-                seg_ok = (t_seg is None and r_seg is None) or (t_seg is not None and r_seg is not None and (t_seg.lower() in r_seg.lower() or r_seg.lower() in t_seg.lower()))
+                norm_r = normalize_segment_for_matching(r_seg)
+                seg_ok = (norm_t is None and norm_r is None) or (norm_t is not None and norm_r is not None and norm_t == norm_r)
                 if seg_ok:
                     try:
                         now_rate = float(r["value"])
@@ -1544,8 +1672,8 @@ def evaluate_future_multiyear_target(
                     except (ValueError, TypeError):
                         pass
 
-        # 2. Look in n_items (latest rate)
-        if now_rate is None:
+        # 2. Look in n_items (latest rate) - never for aum_growth
+        if now_rate is None and t_metric != "aum_growth":
             matching_n = [
                 n for n in n_items
                 if n.get("metric") == t_metric and n.get("unit") == "%" and n.get("value") is not None and "QoQ" not in n.get("label", "")
@@ -1591,9 +1719,10 @@ def evaluate_future_multiyear_target(
 
         # If target has a segment, check for segment reported amount first
         if t_seg is not None:
+            norm_t = normalize_segment_for_matching(t_seg)
             for r in r_items:
-                r_seg = r.get("segment")
-                if r_seg and (t_seg.lower() in r_seg.lower() or r_seg.lower() in t_seg.lower()):
+                norm_r = normalize_segment_for_matching(r.get("segment"))
+                if norm_t is not None and norm_r is not None and norm_t == norm_r:
                     if r.get("unit") != "%" and r.get("value") is not None:
                         val_f = float(r["value"])
                         cov_str = r.get("covers") or ""
@@ -1635,17 +1764,21 @@ def evaluate_future_multiyear_target(
                     "revision_label": revision_label,
                 }
 
-        if base_ttm is None:
+        # Look in n_items (only if not aum_growth, which cannot use revenue)
+        if base_ttm is None and t_metric != "aum_growth":
             for n in n_items:
                 if n.get("covers") == "TTM":
                     if n.get("metric") == t_metric and n.get("unit") != "%" and base_ttm is None:
                         base_ttm = float(n["value"])
                         cited_ids.append(n["id"])
-                    elif n.get("metric") in [f"{t_metric}_growth", "revenue_growth"] and n.get("unit") == "%" and ttm_growth is None:
+                    elif n.get("metric") == f"{t_metric}_growth" and n.get("unit") == "%" and ttm_growth is None:
+                        ttm_growth = float(n["value"])
+                        cited_ids.append(n["id"])
+                    elif t_metric == "revenue" and n.get("metric") == "revenue_growth" and n.get("unit") == "%" and ttm_growth is None:
                         ttm_growth = float(n["value"])
                         cited_ids.append(n["id"])
 
-        if base_ttm is None:
+        if base_ttm is None and t_metric != "aum_growth":
             for n in n_items:
                 if n.get("covers") == "TTM" and n.get("unit") == "₹ cr" and base_ttm is None:
                     base_ttm = float(n["value"])
@@ -1866,6 +1999,21 @@ def apply_python_overrides_and_runrates(
 
         cited_items = [cand_by_id[eid] for eid in ev_ids]
 
+        # Metric guard: aum_growth targets may only use aum_growth evidence, never revenue growth
+        if t.get("metric") == "aum_growth":
+            valid_aum_evs = [
+                e for e in cited_items
+                if e.get("metric") == "aum_growth" and "revenue" not in (e.get("metric") or "").lower()
+            ]
+            if not valid_aum_evs and verdict not in ["unverifiable", "pending"]:
+                orig_v = verdict
+                verdict = "unverifiable"
+                evidence_text = "aum_growth target cannot be judged with revenue growth evidence"
+                overrides_count += 1
+                ev_ids = []
+                cited_items = []
+                logger.warning("Override [%s]: %s -> unverifiable (aum_growth cannot use revenue evidence)", t_id, orig_v)
+
         # 2. Unit Matching Check
         target_unit = t.get("unit") or (t.get("target") or {}).get("unit")
         t_unit_norm = normalize_unit(target_unit, statement + " " + t.get("metric", ""))
@@ -1979,6 +2127,35 @@ def apply_python_overrides_and_runrates(
                         multiplier = 1.0
                         effective_val = val_f
                         run_rate_label = ""
+
+                    # Scale guard: if an evidence value is more than 10x or less than 0.1x the target,
+                    # the evidence is invalid and the verdict is unverifiable ("not comparable").
+                    # This catches e.g. "add 4 branches" vs total of 632.
+                    tgt_ref = (low_f + high_f) / 2.0
+                    scale_mismatch = False
+                    if tgt_ref > 0 and effective_val > 0:
+                        ratio = effective_val / tgt_ref
+                        raw_ratio = val_f / tgt_ref
+                        if ratio > 10.0 or ratio < 0.1 or raw_ratio > 10.0 or raw_ratio < 0.1:
+                            scale_mismatch = True
+
+                    if scale_mismatch:
+                        orig_v = verdict
+                        verdict = "unverifiable"
+                        evidence_text = f"not comparable: evidence value ({val_f:g}) differs by >10× from target ({tgt_ref:g})"
+                        overrides_count += 1
+                        logger.warning("Override [%s]: %s -> unverifiable (scale mismatch: evidence %s vs target %s)", t_id, orig_v, val_f, tgt_ref)
+                        final_verdicts.append({
+                            "id": t_id,
+                            "promise": statement,
+                            "made_in": t.get("first_made_in", ""),
+                            "applies_to": applies_to,
+                            "verdict": verdict,
+                            "evidence": clean_money_in_evidence_text(evidence_text),
+                            "evidence_ids": ev_ids,
+                            "revision_label": revision_label,
+                        })
+                        continue
 
                     # Direction by metric:
                     # - Capex is neutral: above_plan / within_plan / below_plan

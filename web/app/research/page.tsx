@@ -9,7 +9,8 @@ export const metadata: Metadata = {
   description: "Primary-source corporate analysis, management promises, and financial reality.",
 };
 
-export const revalidate = 60;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 interface ResearchedCompanyItem {
   ticker: string;

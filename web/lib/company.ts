@@ -307,8 +307,11 @@ export function cleanEvidenceText(evidence?: string): string {
 
   // 11. Ensure "at current run-rate" on run-rate evidence
   if (/\brun-rate\b/i.test(text) && !/at current run-rate/i.test(text)) {
-    text = text.replace(/\b(?:revenue\s+)?run-rate(?:\s+is)?/gi, "revenue at current run-rate:");
+    text = text.replace(/\b(?:revenue\s+)?run-rate(?:\s+(?:is|of))?/gi, "revenue at current run-rate:");
   }
+  text = text.replace(/\brun-rate:\s*of\s*₹/gi, "run-rate: ₹");
+  text = text.replace(/\brun-rate\s+of\s*₹/gi, "run-rate: ₹");
+  text = text.replace(/\brun-rate:\s*of\b/gi, "run-rate:");
 
   // 12. Format percentages to 1 decimal if they have 2+ decimals
   text = text.replace(/(\d+\.\d{2,})%/g, (_, num) => `${parseFloat(num).toFixed(1)}%`);
@@ -323,8 +326,23 @@ export function cleanEvidenceText(evidence?: string): string {
 function formatGuidanceUnits(val: string): string {
   let s = val.trim();
 
-  // Unit replacements
-  s = s.replace(/(\d+)units\b/gi, "$1 mn units");
+  // Unit replacements with sensible scaling (no 17500000 mn units)
+  s = s.replace(/(\d+(?:\.\d+)?)\s*(?:mn\s+units|million\s+units)/gi, (_, numStr) => {
+    const num = parseFloat(numStr);
+    if (num >= 1_000_000) {
+      return `${+(num / 1_000_000).toFixed(1)} mn units`;
+    }
+    return `${numStr} mn units`;
+  });
+
+  s = s.replace(/(\d+(?:\.\d+)?)\s*units\b/gi, (_, numStr) => {
+    const num = parseFloat(numStr);
+    if (num >= 1_000_000) {
+      return `${+(num / 1_000_000).toFixed(1)} mn units`;
+    }
+    return `${numStr} units`;
+  });
+
   s = s.replace(/(\d+)stores\b/gi, "$1 stores");
   s = s.replace(/(\d+)\$/g, "$$$1B");
   s = s.replace(/(\d+)x\b/gi, "$1×");
@@ -338,6 +356,17 @@ function formatGuidanceUnits(val: string): string {
   s = s.replace(/₹\s*₹+/g, "₹");
 
   return s;
+}
+
+function getStepUnit(val: string): string {
+  const v = val.toLowerCase();
+  if (v.includes("%")) return "%";
+  if (v.includes("bps")) return "bps";
+  if (v.includes("cr") || v.includes("₹")) return "cr";
+  if (v.includes("store")) return "stores";
+  if (v.includes("unit")) return "units";
+  if (v.includes("$")) return "$";
+  return "";
 }
 
 export function parseRevisedTimeline(timelineList: string[]): RevisedGuidance[] {
@@ -355,6 +384,11 @@ export function parseRevisedTimeline(timelineList: string[]): RevisedGuidance[] 
     if (colonIdx !== -1) {
       metricLabel = item.slice(0, colonIdx).trim();
       rest = item.slice(colonIdx + 1).trim();
+    }
+
+    // Only numeric metrics (never milestone)
+    if (metricLabel.toLowerCase().includes("milestone")) {
+      continue;
     }
 
     // Replace standard arrows
@@ -380,6 +414,12 @@ export function parseRevisedTimeline(timelineList: string[]): RevisedGuidance[] 
 
     // Rule: ONLY chains of 2+ numeric values of the same metric, segment and period.
     if (steps.length < 2) {
+      continue;
+    }
+
+    // Rule: all values in one unit (never mix % with cr or stores)
+    const stepUnits = steps.map((s) => getStepUnit(s.value)).filter(Boolean);
+    if (stepUnits.length >= 2 && new Set(stepUnits).size > 1) {
       continue;
     }
 
