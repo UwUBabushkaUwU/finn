@@ -55,10 +55,10 @@ def get_gemini_client(has_pdf: bool = False) -> genai.Client:
         return _client_pdf
     else:
         if _client_text is None:
-            # HttpOptions timeout is in milliseconds: 25 seconds = 25,000 ms
+            # HttpOptions timeout is in milliseconds: 90 seconds = 90,000 ms
             _client_text = genai.Client(
                 api_key=GEMINI_API_KEY,
-                http_options=types.HttpOptions(timeout=25_000),
+                http_options=types.HttpOptions(timeout=90_000),
             )
         return _client_text
 
@@ -109,7 +109,7 @@ def _execute_gemini_call(
     """Execute Gemini generate_content with JSON mode and rate-limit backoff."""
     valid_pdf = bool(pdf_bytes and pdf_bytes.startswith(b"%PDF"))
     client = get_gemini_client(has_pdf=valid_pdf)
-    backoff_delays = [10, 30, 60]
+    backoff_delays = [5, 15, 30, 45, 60]
 
     contents: list[Any] | str
     if valid_pdf:

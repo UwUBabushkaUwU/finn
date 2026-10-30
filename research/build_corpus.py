@@ -97,12 +97,12 @@ class ScreenerClient:
     def download_pdf(self, url: str) -> bytes | None:
         """Download a PDF document politely with retry."""
         self._throttle(min_delay=2.0)
-        max_retries = 3
+        max_retries = 2
         backoff = 2.0
 
         for attempt in range(1, max_retries + 1):
             try:
-                resp = self.session.get(url, timeout=30)
+                resp = self.session.get(url, timeout=10)
                 if resp.status_code == 200:
                     return resp.content
                 logger.warning("HTTP %d downloading %s (attempt %d/%d)", resp.status_code, url, attempt, max_retries)
