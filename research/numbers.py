@@ -170,12 +170,30 @@ def compute_numbers_for_ticker(ticker: str) -> dict[str, Any]:
                     },
                 }
 
-        # Latest Operating Margin
+        # Latest Operating Margin (or Financing Margin for lenders)
         if is_lender:
-            snapshot["latest_operating_margin"] = {
-                "value": None,
-                "note": "lender: different metrics",
-            }
+            fin_margin_labels = ["Financing Margin %", "Financing Margin", "OPM %", "Operating Profit Margin"]
+            q_fin_margin_match = find_row(q_tbl, fin_margin_labels)
+            if q_fin_margin_match:
+                _, fm_vals = q_fin_margin_match
+                if latest_q_idx < len(fm_vals) and fm_vals[latest_q_idx] is not None:
+                    snapshot["latest_operating_margin"] = {
+                        "value": float(fm_vals[latest_q_idx]),
+                        "unit": "%",
+                        "quarter": latest_q_col,
+                        "label": "Financing Margin",
+                        "source": {"table": "quarterly_results", "column": latest_q_col},
+                    }
+                else:
+                    snapshot["latest_operating_margin"] = {
+                        "value": None,
+                        "note": "lender: financing margin not in quarterly table",
+                    }
+            else:
+                snapshot["latest_operating_margin"] = {
+                    "value": None,
+                    "note": "lender: financing margin not in quarterly table",
+                }
         elif q_opm_match:
             _, opm_vals = q_opm_match
             if latest_q_idx < len(opm_vals) and opm_vals[latest_q_idx] is not None:

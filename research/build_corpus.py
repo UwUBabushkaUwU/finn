@@ -76,15 +76,17 @@ class ScreenerClient:
             if not html:
                 continue
 
-            # Verify quarterly table has rows
+            # Verify quarterly table has rows and valid columns
             soup = BeautifulSoup(html, "html.parser")
             quarters_sec = soup.find("section", id="quarters")
             if quarters_sec:
                 table = quarters_sec.find("table", class_="data-table")
                 if table and table.find("tbody"):
                     rows = table.find("tbody").find_all("tr")
-                    if len(rows) > 0:
-                        logger.info("Found populated quarterly table for %s using %s", ticker, basis)
+                    thead = table.find("thead")
+                    th_cols = [th.get_text(strip=True) for th in thead.find_all("th") if th.get_text(strip=True)] if thead else []
+                    if len(rows) > 0 and len(th_cols) >= 2:
+                        logger.info("Found populated quarterly table for %s using %s (%d columns, %d rows)", ticker, basis, len(th_cols), len(rows))
                         return html, basis
 
             logger.info("Quarterly table empty or missing at %s; trying fallback", url)

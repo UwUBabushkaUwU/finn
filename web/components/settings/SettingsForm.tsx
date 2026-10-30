@@ -336,7 +336,7 @@ export function SettingsForm({ initialSettings, portfolioCompanies }: SettingsFo
             Your portfolio ({portfolioCompanies.length})
           </h2>
           <span className="text-[10px] font-mono text-neutral-400 dark:text-neutral-500">
-            Edit in portfolio.yaml
+            Portfolio is fixed for this demo
           </span>
         </div>
 

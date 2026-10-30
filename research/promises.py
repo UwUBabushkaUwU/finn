@@ -64,6 +64,7 @@ ALLOWED_METRICS = {
     "store_count",
     "aum_growth",
     "credit_cost",
+    "cost_of_funds",
     "nim",
     "milestone",
 }
@@ -113,6 +114,14 @@ def normalize_metric(metric: str, hint: str = "") -> str:
     if m in ALLOWED_METRICS:
         return m
 
+    # Check cost of funds / cost of borrowing FIRST before nim or others
+    if any(k in m or k in h for k in [
+        "cost_of_borrowing", "cost of borrowing", "cost_of_funds", "cost of funds",
+        "borrowing_cost", "borrowing cost", "funding_cost", "funding cost",
+        "cost_of_debt", "cost of debt", "cost of borrow"
+    ]):
+        return "cost_of_funds"
+
     # Heuristic mapping for near matches
     if "ebitda" in m or "opm" in m or "operating_margin" in m:
         return "ebitda_margin"
@@ -151,12 +160,14 @@ def normalize_metric(metric: str, hint: str = "") -> str:
 
 
 def normalize_unit(unit_str: str | None, hint: str = "") -> str | None:
-    """Normalize unit representation to standard categories: %, ₹ cr, $, units, stores."""
+    """Normalize unit representation to standard categories: bps, %, ₹ cr, $, units, stores."""
     if unit_str:
         u = unit_str.strip().lower()
+        if any(k in u for k in ["bps", "basis point", "basis points"]):
+            return "bps"
         if any(k in u for k in ["$", "usd", "dollar"]):
             return "$"
-        if any(k in u for k in ["%", "percent", "pct", "bps"]):
+        if any(k in u for k in ["%", "percent", "pct"]):
             return "%"
         if "₹" in u or re.search(r"\b(?:rs|inr|cr|crore|crores|lakh|lakhs)\b", u):
             return "₹ cr"
@@ -166,9 +177,11 @@ def normalize_unit(unit_str: str | None, hint: str = "") -> str | None:
             return "units"
 
     s = hint.lower()
+    if any(k in s for k in ["bps", "basis point", "basis points"]):
+        return "bps"
     if any(k in s for k in ["$", "usd", "dollar"]):
         return "$"
-    if any(k in s for k in ["%", "percent", "pct", "bps", "margin"]):
+    if any(k in s for k in ["%", "percent", "pct", "margin"]):
         return "%"
     if "₹" in s or re.search(r"\b(?:rs|inr|cr|crore|crores|lakh|lakhs)\b", s):
         return "₹ cr"
@@ -372,6 +385,82 @@ def period_falls_inside(covers_str: str, applies_to_str: str) -> bool:
     if not cov_r or not app_r:
         return normalize_period(covers_str) == normalize_period(applies_to_str)
     return cov_r[0] >= app_r[0] and cov_r[1] <= app_r[1]
+
+
+def clean_money_in_evidence_text(text: str) -> str:
+    """Format and sanitize all money expressions in evidence sentences:
+    - remove 'INR'/'Rs.' when ₹ is present
+    - convert 'INR 5,400 to 8,400 crores' or 'INR 3,500-4,000 crores' to '₹5,400–8,400 cr'
+    - eliminate 'of INR … to ₹…' fragments
+    - ensure ₹ strictly precedes amounts with cr
+    - deduplicate currency symbols and normalize whitespace
+    """
+    if not text:
+        return ""
+    
+    # 1. Strip 'INR' / 'Rs.' when directly next to '₹'
+    text = re.sub(r"\b(?:INR|Rs\.?)\s*₹", "₹", text, flags=re.IGNORECASE)
+    text = re.sub(r"₹\s*(?:INR|Rs\.?)", "₹", text, flags=re.IGNORECASE)
+
+    # 2. Replace 'INR' / 'Rs.' before digits with '₹'
+    text = re.sub(r"\b(?:INR|Rs\.?)\s*(\d)", r"₹\1", text, flags=re.IGNORECASE)
+
+    # 3. Standardize 'crores' / 'crore' to 'cr'
+    text = re.sub(r"\b(?:crores|crore)\b", "cr", text, flags=re.IGNORECASE)
+
+    # 4. Fix ranges with 'to' or hyphen/en-dash between numbers ending with 'cr'
+    text = re.sub(
+        r"₹\s*(\d[\d,]*(?:\.\d+)?)\s*(?:cr)?\s*(?:to|-|–)\s*₹?\s*(\d[\d,]*(?:\.\d+)?)\s*cr\b",
+        r"₹\1–\2 cr",
+        text,
+        flags=re.IGNORECASE
+    )
+    
+    # Handle ranges without ₹ on first number: '5,400 to 8,400 cr' -> '₹5,400–8,400 cr'
+    text = re.sub(
+        r"(?<![₹$\d%,\w.])(\d[\d,]*(?:\.\d+)?)\s*(?:to|-|–)\s*₹?\s*(\d[\d,]*(?:\.\d+)?)\s*cr\b",
+        r"₹\1–\2 cr",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 5. Fix 'of INR ... to ₹...' or 'of ₹... to ₹...' fragments -> 'of ₹...–... cr'
+    text = re.sub(
+        r"\bof\s+(?:INR|Rs\.?|₹)?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:to|-|–)\s*₹?\s*(\d[\d,]*(?:\.\d+)?)\s*cr\b",
+        r"of ₹\1–\2 cr",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 6. Ensure ₹ on standalone numbers with cr (not preceded by ₹, $, %, ., etc.)
+    text = re.sub(
+        r"(?<![₹$\d%,\w.])(\d[\d,]*(?:\.\d+)?)\s*cr\b",
+        r"₹\1 cr",
+        text,
+        flags=re.IGNORECASE
+    )
+    text = re.sub(
+        r"(?<![₹$\d%,\w.])(\d[\d,]*(?:\.\d+)?)\s*lakh\s*cr\b",
+        r"₹\1 lakh cr",
+        text,
+        flags=re.IGNORECASE
+    )
+
+    # 7. Clean any remaining 'INR' or 'Rs.' words
+    text = re.sub(r"\b(?:INR|Rs\.?)\b", "", text, flags=re.IGNORECASE)
+
+    # 8. Clean up double currency symbols: '₹₹', '–₹', '₹ 1,200' -> '₹1,200'
+    text = re.sub(r"₹+", "₹", text)
+    text = re.sub(r"–\s*₹", "–", text)
+    text = re.sub(r"₹\s*(\d)", r"₹\1", text)
+
+    # 9. Fix broken Indian comma formatting like '1,₹600' -> '₹1,600'
+    text = re.sub(r"(\d+)\s*,\s*₹\s*(\d+)", r"₹\1,\2", text)
+
+    # 10. Normalize spaces
+    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+([.,;:!?)])", r"\1", text)
+    return text
 
 
 def format_indian_number(val: Any) -> str:
@@ -847,17 +936,11 @@ def group_targets_and_build_timeline(
         first_target = first_item.get("target") or {}
         latest_target = latest_item.get("target") or {}
 
-        # Handle bps to % conversion
+        # Handle bps unit normalization (must be stored and shown as bps, never converted to %)
         for tgt in [first_target, latest_target]:
             raw_u = str(tgt.get("unit") or "").lower()
             if "bps" in raw_u or "basis" in raw_u:
-                tgt["unit"] = "%"
-                if tgt.get("value") is not None:
-                    tgt["value"] = float(tgt["value"]) / 100.0
-                if tgt.get("low") is not None:
-                    tgt["low"] = float(tgt["low"]) / 100.0
-                if tgt.get("high") is not None:
-                    tgt["high"] = float(tgt["high"]) / 100.0
+                tgt["unit"] = "bps"
 
         # Determine revision label
         revision_label = "none"
@@ -894,10 +977,12 @@ def group_targets_and_build_timeline(
         for it in items_sorted:
             t_data = it.get("target") or {}
             val_str = ""
+            u_raw = t_data.get("unit", "")
+            u_str = f" {u_raw}".rstrip() if u_raw == "bps" else u_raw
             if t_data.get("value") is not None:
-                val_str = f"{t_data['value']}{t_data.get('unit', '')}"
+                val_str = f"{t_data['value']}{u_str}"
             elif t_data.get("low") is not None and t_data.get("high") is not None:
-                val_str = f"{t_data['low']}–{t_data['high']}{t_data.get('unit', '')}"
+                val_str = f"{t_data['low']}–{t_data['high']}{u_str}"
             elif it.get("statement"):
                 val_str = it["statement"]
             else:
@@ -913,6 +998,12 @@ def group_targets_and_build_timeline(
             or normalize_unit(None, latest_item.get("statement", "") + " " + metric)
             or ""
         )
+        if any(k in latest_item.get("statement", "").lower() for k in ["bps", "basis point", "basis points"]):
+            target_unit = "bps"
+            if latest_target:
+                latest_target["unit"] = "bps"
+            if first_target:
+                first_target["unit"] = "bps"
 
         t_obj = {
             "id": f"T{target_idx}",
@@ -1612,6 +1703,7 @@ def format_override_evidence_sentence(
         "pat_growth": "PAT growth",
         "aum_growth": "AUM growth",
         "credit_cost": "credit cost",
+        "cost_of_funds": "cost of funds",
         "ebitda_margin": "EBITDA margin",
         "ebit_margin": "EBIT margin",
         "revenue": "revenue",
@@ -1629,6 +1721,7 @@ def format_override_evidence_sentence(
     
     eid_str = ", ".join(ev_ids) if ev_ids else evidence_item.get("id", "")
     is_pct = t_unit_norm == "%"
+    is_bps = t_unit_norm == "bps"
     
     # Format guided target
     t_target = target.get("target") or {}
@@ -1644,9 +1737,31 @@ def format_override_evidence_sentence(
 
         effective_str = format_money(effective_val, "cr")
         if multiplier > 1.0:
-            return f"{covers} {metric_name} at current run-rate: {effective_str} ({eid_str}) vs {guided_str} guided"
+            res = f"{covers} {metric_name} at current run-rate: {effective_str} ({eid_str}) vs {guided_str} guided"
         else:
-            return f"{covers} {metric_name}: {effective_str} ({eid_str}) vs {guided_str} guided"
+            res = f"{covers} {metric_name}: {effective_str} ({eid_str}) vs {guided_str} guided"
+        return clean_money_in_evidence_text(res)
+
+    elif is_bps:
+        if t_target.get("value") is not None:
+            try:
+                guided_str = f"{int(round(float(t_target['value'])))} bps"
+            except (ValueError, TypeError):
+                guided_str = f"{t_target['value']} bps"
+        elif t_target.get("low") is not None and t_target.get("high") is not None:
+            try:
+                guided_str = f"{int(round(float(t_target['low'])))}–{int(round(float(t_target['high'])))} bps"
+            except (ValueError, TypeError):
+                guided_str = f"{t_target['low']}–{t_target['high']} bps"
+        else:
+            guided_str = f"{int(round(low_f))}–{int(round(high_f))} bps"
+
+        try:
+            val_str = f"{int(round(effective_val))} bps"
+        except (ValueError, TypeError):
+            val_str = f"{effective_val} bps"
+        res = f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
+        return clean_money_in_evidence_text(res)
 
     elif is_pct:
         if t_target.get("value") is not None:
@@ -1660,7 +1775,8 @@ def format_override_evidence_sentence(
             guided_str = f"{low_f:.1f}–{high_f:.1f}%"
 
         val_str = f"{effective_val:.1f}%"
-        return f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
+        res = f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
+        return clean_money_in_evidence_text(res)
 
     else:
         u_suffix = f" {t_unit_norm}" if t_unit_norm else ""
@@ -1673,9 +1789,10 @@ def format_override_evidence_sentence(
 
         val_str = f"{format_indian_number(effective_val)}{u_suffix}"
         if multiplier > 1.0:
-            return f"{covers} {metric_name} at current run-rate: {val_str} ({eid_str}) vs {guided_str} guided"
+            res = f"{covers} {metric_name} at current run-rate: {val_str} ({eid_str}) vs {guided_str} guided"
         else:
-            return f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
+            res = f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
+        return clean_money_in_evidence_text(res)
 
 
 def apply_python_overrides_and_runrates(
@@ -1753,9 +1870,20 @@ def apply_python_overrides_and_runrates(
         target_unit = t.get("unit") or (t.get("target") or {}).get("unit")
         t_unit_norm = normalize_unit(target_unit, statement + " " + t.get("metric", ""))
 
+        def units_compatible(u1: str | None, u2: str | None, m: str) -> bool:
+            if u1 == u2:
+                return True
+            if {u1, u2} == {"bps", "%"} and m in ("credit_cost", "cost_of_funds"):
+                return True
+            return False
+
         if t_unit_norm is not None and cited_items:
             has_matching_unit = any(
-                normalize_unit(e.get("unit"), e.get("description", "") or e.get("quote", "")) == t_unit_norm
+                units_compatible(
+                    normalize_unit(e.get("unit"), e.get("description", "") or e.get("quote", "")),
+                    t_unit_norm,
+                    t.get("metric", "")
+                )
                 for e in cited_items
             )
             if not has_matching_unit and verdict not in ["unverifiable", "pending"]:
@@ -1788,7 +1916,12 @@ def apply_python_overrides_and_runrates(
                 pass
 
         # Exclude delta targets (e.g. 100 basis points improvement) from comparing absolute margin against delta number
-        if "basis point" in statement.lower() or "bps" in statement.lower():
+        # Do not exclude absolute credit cost or cost of funds guided in bps
+        is_delta_target = (
+            any(w in statement.lower() for w in ["improvement", "expansion", "reduction", "increase by", "decrease by", "expand by", "compress by"])
+            and ("basis point" in statement.lower() or "bps" in statement.lower())
+        )
+        if is_delta_target:
             low = None
             high = None
 
@@ -1798,10 +1931,14 @@ def apply_python_overrides_and_runrates(
                 low_f = float(low)
                 high_f = float(high)
 
-                is_amount = t_unit_norm != "%"
+                is_amount = t_unit_norm not in ("%", "bps")
                 matching_evs = [
                     e for e in cited_items
-                    if normalize_unit(e.get("unit"), e.get("description", "") or e.get("quote", "")) == t_unit_norm
+                    if units_compatible(
+                        normalize_unit(e.get("unit"), e.get("description", "") or e.get("quote", "")),
+                        t_unit_norm,
+                        t.get("metric", "")
+                    )
                     and e.get("value") is not None
                 ]
 
@@ -1809,6 +1946,13 @@ def apply_python_overrides_and_runrates(
                     e = matching_evs[0]
                     val_f = float(e["value"])
                     covers_str = e.get("covers", "")
+                    e_unit_norm = normalize_unit(e.get("unit"), e.get("description", "") or e.get("quote", ""))
+
+                    # Scale between bps and % if needed
+                    if t_unit_norm == "bps" and e_unit_norm == "%":
+                        val_f = val_f * 100.0
+                    elif t_unit_norm == "%" and e_unit_norm == "bps":
+                        val_f = val_f / 100.0
 
                     if t_unit_norm == "$":
                         if val_f > 100 and high_f < 50:
@@ -1838,7 +1982,7 @@ def apply_python_overrides_and_runrates(
 
                     # Direction by metric:
                     # - Capex is neutral: above_plan / within_plan / below_plan
-                    # - Credit cost: lower is better (below range is good)
+                    # - Credit cost and cost of funds: lower is better (below range is good)
                     # - Revenue, margins, growth, volume: higher is better
                     metric = t.get("metric", "")
                     if metric == "capex":
@@ -1848,7 +1992,7 @@ def apply_python_overrides_and_runrates(
                             new_v = "below_plan"
                         else:
                             new_v = "within_plan"
-                    elif metric == "credit_cost":
+                    elif metric in ("credit_cost", "cost_of_funds"):
                         if effective_val < low_f:
                             new_v = ("likely_delivered" if is_partial else "delivered") if period_ended else "ahead"
                         elif effective_val > high_f:
@@ -1901,7 +2045,7 @@ def apply_python_overrides_and_runrates(
             "made_in": t.get("first_made_in", ""),
             "applies_to": applies_to,
             "verdict": verdict,
-            "evidence": evidence_text.strip(),
+            "evidence": clean_money_in_evidence_text(evidence_text.strip()),
             "evidence_ids": ev_ids,
             "revision_label": revision_label,
         })
@@ -2051,16 +2195,36 @@ def judge_promises_for_company(
         latest_quarter=latest_quarter,
     )
 
+    for mv in auto_resolved_verdicts:
+        if "evidence" in mv:
+            mv["evidence"] = clean_money_in_evidence_text(mv["evidence"])
+
     all_verdicts = auto_resolved_verdicts + validated_model_verdicts
     all_verdicts.sort(key=lambda v: int("".join(c for c in v["id"] if c.isdigit()) or 999))
 
+    def map_verdict_to_display_word(v_name: str) -> str:
+        norm = (v_name or "").strip().lower()
+        if norm in ["delivered", "likely_delivered"]:
+            return "kept"
+        if norm in ["missed", "likely_missed", "partly"]:
+            return "broken"
+        if norm in ["ahead", "ended + ahead"]:
+            return "ahead"
+        if norm in ["on_track", "above_plan", "within_plan", "below_plan"]:
+            return "on track"
+        if norm == "behind":
+            return "behind"
+        if norm == "pending":
+            return "too early"
+        return "can't verify"
+
     # Executive read generated after overrides via small bulk call
     verdict_lines = [
-        f"- {v['promise']} ({v['applies_to']}): {v['verdict']} [Rev: {v.get('revision_label', 'none')}] — {v.get('evidence', '')}"
+        f"- {v['promise']} ({v['applies_to']}): {map_verdict_to_display_word(v['verdict'])} [Rev: {v.get('revision_label', 'none')}] — {v.get('evidence', '')}"
         for v in all_verdicts
     ]
     verdicts_summary = "\n".join(verdict_lines)
-    read_template_path = Path(__file__).resolve().parent / "prompts" / "read_v4.txt"
+    read_template_path = Path(__file__).resolve().parent / "prompts" / "read_v5.txt"
     if read_template_path.exists():
         read_template = read_template_path.read_text(encoding="utf-8")
     else:
@@ -2073,8 +2237,8 @@ def judge_promises_for_company(
     read_resp = call_json(
         task="bulk",
         prompt=read_prompt,
-        prompt_version="read_v4",
-        use_cache=True,
+        prompt_version="read_v5",
+        use_cache=False,
     )
     read_text = read_resp.get("read", "") if isinstance(read_resp, dict) else ""
 
@@ -2083,6 +2247,17 @@ def judge_promises_for_company(
     for bw in bad_words:
         read_text = re.sub(rf"\b(?:a\s+)?{bw}\b", "", read_text, flags=re.IGNORECASE)
     read_text = re.sub(r"\s+", " ", read_text).strip()
+
+    # Strict compliance check: never say "delivered" for on track or too early targets
+    kept_total = sum(1 for v in all_verdicts if map_verdict_to_display_word(v.get("verdict", "")) in ("kept", "ahead"))
+    if kept_total == 0:
+        read_text = re.sub(r"\bdelivered\b", "is on track with", read_text, flags=re.IGNORECASE)
+        read_text = re.sub(r"\bhas delivered\b", "is on track with", read_text, flags=re.IGNORECASE)
+        read_text = re.sub(r"\bmet\b", "on track", read_text, flags=re.IGNORECASE)
+        read_text = re.sub(r"\bachieved\b", "progressed on", read_text, flags=re.IGNORECASE)
+
+    # Sanitize currency and money representation in the read
+    read_text = clean_money_in_evidence_text(read_text)
 
     # Tally counts
     counts_dict: dict[str, int] = {

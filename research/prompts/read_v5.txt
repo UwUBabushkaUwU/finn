@@ -1,0 +1,17 @@
+You are an equity research analyst summarizing management credibility and track record for {ticker}.
+Here are the final verified verdicts on management's commitments:
+
+{verdicts_summary}
+
+Write a concise 2-sentence executive read describing management's delivery.
+Strict rules:
+1. Do NOT use any judgement words or subjective praise (e.g. do not use "well-managed", "solid", "strong", "robust", "impressive", "healthy", "commendable", "prudent").
+2. Describe ONLY facts: what was kept, what was broken, and what was moved, revised, or remains in progress.
+3. You MUST use the exact final verdict words: "kept", "broken", "on track", "ahead", "too early", or "can't verify". NEVER say "delivered", "achieved", or "met" for an on-track or too-early item.
+4. Name notable promises in plain words describing what was promised (e.g. "50% revenue growth target", "FY26 capex guidance", "refrigerator segment target"), NEVER use internal IDs like T1, T2, etc.
+5. Use ONLY the verdicts listed above; never contradict them.
+
+Return JSON:
+{
+  "read": "your 2-sentence summary here"
+}

@@ -338,12 +338,12 @@ export function NumbersSection({ numbers, financials }: NumbersSectionProps) {
       )}
 
       {/* Flags Section */}
-      <div className="space-y-1.5">
-        <div className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
-          Balance-sheet & Cash flags
-        </div>
+      {triggeredFlags.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="text-[10px] font-mono uppercase tracking-wider text-neutral-400 dark:text-neutral-500">
+            Balance-sheet & Cash flags
+          </div>
 
-        {triggeredFlags.length > 0 ? (
           <div className="space-y-1.5">
             {triggeredFlags.map((flag, idx) => (
               <div
@@ -361,16 +361,8 @@ export function NumbersSection({ numbers, financials }: NumbersSectionProps) {
               </div>
             ))}
           </div>
-        ) : (
-          <div
-            id="N_NO_FLAGS"
-            className="p-2 rounded border border-neutral-200 dark:border-neutral-800 bg-neutral-50/60 dark:bg-neutral-900/30 text-xs font-mono text-neutral-600 dark:text-neutral-400 flex items-center gap-1.5"
-          >
-            <span className="text-emerald-600 dark:text-emerald-400 select-none">✓</span>
-            <span>No balance-sheet or cash flags.</span>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Hidden Anchors for bull/bear references like N_CCC_DAYS, N_WC_DAYS, N_CASH_CONV_3Y */}
       <div className="hidden" aria-hidden="true">

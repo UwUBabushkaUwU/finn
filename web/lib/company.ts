@@ -273,25 +273,47 @@ export function cleanEvidenceText(evidence?: string): string {
   text = text.replace(/\s*\([A-Z]\d+\)/g, "");
   text = text.replace(/\s*citing\s+[A-Z]\d+\b/gi, "");
 
-  // 2. Fix broken double currency symbols like ₹1,₹600 cr or 1,₹600 cr
-  text = text.replace(/₹\s*(\d+)\s*,\s*₹\s*(\d+)/g, "₹$1,$2");
+  // 2. Pre-clean: strip "INR" / "Rs." when directly next to "₹"
+  text = text.replace(/\b(?:INR|Rs\.?)\s*₹/gi, "₹");
+  text = text.replace(/₹\s*(?:INR|Rs\.?)/gi, "₹");
+
+  // 3. Replace "INR" / "Rs." before numbers with "₹"
+  text = text.replace(/\b(?:INR|Rs\.?)\s*(\d)/gi, "₹$1");
+
+  // 4. Standardize "crores" / "crore" to "cr"
+  text = text.replace(/\b(?:crores|crore)\b/gi, "cr");
+
+  // 5. Fix ranges with "to" or hyphen/en-dash between numbers ending with "cr":
+  text = text.replace(/₹\s*(\d[\d,]*(?:\.\d+)?)\s*(?:cr)?\s*(?:to|-|–)\s*₹?\s*(\d[\d,]*(?:\.\d+)?)\s*cr\b/gi, "₹$1–$2 cr");
+  text = text.replace(/(?<![₹$\d%,\w.])(\d[\d,]*(?:\.\d+)?)\s*(?:to|-|–)\s*₹?\s*(\d[\d,]*(?:\.\d+)?)\s*cr\b/gi, "₹$1–$2 cr");
+
+  // 6. Fix "of INR ... to ₹..." or "of ₹... to ₹..." fragments
+  text = text.replace(/\bof\s+(?:INR|Rs\.?|₹)?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:to|-|–)\s*₹?\s*(\d[\d,]*(?:\.\d+)?)\s*cr\b/gi, "of ₹$1–$2 cr");
+
+  // 7. Ensure ₹ on standalone numbers with cr (not preceded by ₹, $, %, ., etc.):
+  text = text.replace(/(?<![₹$\d%,\w.])(\d[\d,]*(?:\.\d+)?)\s*cr\b/gi, "₹$1 cr");
+  text = text.replace(/(?<![₹$\d%,\w.])(\d[\d,]*(?:\.\d+)?)\s*lakh\s*cr\b/gi, "₹$1 lakh cr");
+
+  // 8. Clean any remaining "INR" or "Rs." words
+  text = text.replace(/\b(?:INR|Rs\.?)\b/gi, "");
+
+  // 9. Clean up double currency symbols: "₹₹", "–₹", "₹ 1,200" -> "₹1,200"
+  text = text.replace(/₹+/g, "₹");
+  text = text.replace(/–\s*₹/g, "–");
+  text = text.replace(/₹\s*(\d)/g, "₹$1");
+
+  // 10. Fix broken Indian comma formatting like "1,₹600" -> "₹1,600"
   text = text.replace(/(\d+)\s*,\s*₹\s*(\d+)/g, "₹$1,$2");
-  text = text.replace(/₹\s*₹+/g, "₹");
 
-  // Prepend ₹ on every amount in cr/crores strictly before the number, never inside
-  text = text.replace(/(^|[^\d₹$,])(\d{1,3}(?:,\d{2,3})*(?:\.\d+)?)\s*(?:cr|crores)\b/gi, "$1₹$2 cr");
-  text = text.replace(/(^|[^\d₹$,])(\d{1,3}(?:,\d{2,3})*)–(\d{1,3}(?:,\d{2,3})*)\s*(?:cr|crores)\b/gi, "$1₹$2–$3 cr");
-  text = text.replace(/₹\s*₹+/g, "₹");
-
-  // 3. Ensure "at current run-rate" on run-rate evidence
+  // 11. Ensure "at current run-rate" on run-rate evidence
   if (/\brun-rate\b/i.test(text) && !/at current run-rate/i.test(text)) {
     text = text.replace(/\b(?:revenue\s+)?run-rate(?:\s+is)?/gi, "revenue at current run-rate:");
   }
 
-  // 4. Format percentages to 1 decimal if they have 2+ decimals
+  // 12. Format percentages to 1 decimal if they have 2+ decimals
   text = text.replace(/(\d+\.\d{2,})%/g, (_, num) => `${parseFloat(num).toFixed(1)}%`);
 
-  // 5. Clean up whitespace
+  // 13. Clean up whitespace
   text = text.replace(/\s+/g, " ").trim();
   text = text.replace(/\s+([.,;:])/g, "$1");
 

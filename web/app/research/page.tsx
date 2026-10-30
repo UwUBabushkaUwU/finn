@@ -155,6 +155,18 @@ export default async function ResearchPage() {
                 const tooEarlyPct = total > 0 ? (company.tooEarlyCount / total) * 100 : 0;
                 const cantVerifyPct = total > 0 ? (company.cantVerifyCount / total) * 100 : 0;
 
+                let summaryText = `${company.keptCount} kept · ${company.brokenCount} broken`;
+                if (company.keptCount === 0 && company.brokenCount === 0) {
+                  const parts: string[] = [];
+                  if (company.tooEarlyCount > 0) parts.push(`${company.tooEarlyCount} too early`);
+                  if (company.otherProgressCount > 0) parts.push(`${company.otherProgressCount} on track`);
+                  if (company.behindCount > 0) parts.push(`${company.behindCount} behind`);
+                  if (company.cantVerifyCount > 0) parts.push(`${company.cantVerifyCount} can't verify`);
+                  if (parts.length > 0) {
+                    summaryText = parts.join(" · ");
+                  }
+                }
+
                 return (
                   <Link
                     key={company.ticker}
@@ -226,7 +238,7 @@ export default async function ResearchPage() {
                       )}
 
                       <span className="text-[11px] font-mono text-neutral-500 dark:text-neutral-400">
-                        {company.keptCount} kept · {company.brokenCount} broken
+                        {summaryText}
                       </span>
                     </div>
                   </Link>

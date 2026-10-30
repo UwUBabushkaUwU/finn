@@ -10,6 +10,18 @@ export function BusinessSnapshot({ snapshot, meta }: BusinessSnapshotProps) {
 
   const { what_it_does, segments = [], customers_and_markets, pages_used = [] } = snapshot;
 
+  const hasWhatItDoes = Boolean(
+    what_it_does && what_it_does.trim() && what_it_does.trim().toLowerCase() !== "none"
+  );
+  const hasSegments = segments.length > 0 && segments.some((s) => s.share_of_revenue != null);
+  const hasCustomers = Boolean(
+    customers_and_markets &&
+      customers_and_markets.trim() &&
+      customers_and_markets.trim().toLowerCase() !== "none"
+  );
+
+  if (!hasWhatItDoes && !hasSegments && !hasCustomers) return null;
+
   // Annual report link resolution
   const annualReport = meta?.documents_used?.find((d) => d.kind === "annual_report");
   const arPeriod = annualReport?.period || "FY26";
@@ -35,8 +47,6 @@ export function BusinessSnapshot({ snapshot, meta }: BusinessSnapshotProps) {
     "bg-neutral-400 dark:bg-neutral-600 text-neutral-600 dark:text-neutral-300",
   ];
 
-  const hasSegments = segments.length > 0 && segments.some((s) => s.share_of_revenue != null);
-
   return (
     <section aria-labelledby="business-snapshot-heading" className="space-y-3 pt-2">
       <div className="flex items-baseline justify-between border-b border-neutral-200 dark:border-neutral-800 pb-1">
@@ -52,7 +62,7 @@ export function BusinessSnapshot({ snapshot, meta }: BusinessSnapshotProps) {
       </div>
 
       {/* What it does */}
-      {what_it_does && (
+      {hasWhatItDoes && (
         <div id="S_WHAT" className="text-xs leading-relaxed text-neutral-800 dark:text-neutral-200 font-sans">
           {what_it_does}
         </div>
@@ -112,8 +122,8 @@ export function BusinessSnapshot({ snapshot, meta }: BusinessSnapshotProps) {
         </div>
       )}
 
-      {/* Customers and Markets */}
-      {customers_and_markets && (
+      {/* Customers and Markets (only when content exists) */}
+      {hasCustomers && (
         <div id="S_CUSTOMERS" className="space-y-1 pt-1">
           <div className="text-[10px] font-mono uppercase tracking-wider text-neutral-500 dark:text-neutral-400">
             Customers & Markets
@@ -145,4 +155,3 @@ export function BusinessSnapshot({ snapshot, meta }: BusinessSnapshotProps) {
     </section>
   );
 }
-

@@ -18,8 +18,9 @@ Metric Taxonomy:
 - capacity: manufacturing capacity or utilization
 - store_count: retail store count, openings, or branch network
 - aum_growth: AUM level or AUM growth percentages
-- credit_cost: credit cost or loan loss provisions
-- nim: net interest margin or spreads
+- credit_cost: credit cost or loan loss provisions (in bps or %)
+- cost_of_funds: cost of funds, cost of borrowing, borrowing costs (lower is better, in bps or %)
+- nim: net interest margin or spreads (excluding cost of funds/borrowing)
 - milestone: operational project milestones (plant commissioning, commercial production start, factory readiness, product launches, trials, JV/M&A closure) that do not fit numeric metrics
 
 Segment Field:
@@ -40,10 +41,10 @@ Exclusions:
 Return JSON:
 {
   "guidance": [ {
-    "metric": one of [revenue, revenue_growth, ebitda_margin, ebit_margin, pat, pat_growth, capex, order_book, volume, capacity, store_count, aum_growth, credit_cost, nim, milestone],
+    "metric": one of [revenue, revenue_growth, ebitda_margin, ebit_margin, pat, pat_growth, capex, order_book, volume, capacity, store_count, aum_growth, credit_cost, cost_of_funds, nim, milestone],
     "segment": string or null,
     "statement": what management committed to, in at most 20 words,
-    "target": {"value": number or null, "low": number or null, "high": number or null, "unit": "%" | "₹ cr" | "$" | "units" | "stores" | null, "direction": "up" | "down" | "flat" | null},
+    "target": {"value": number or null, "low": number or null, "high": number or null, "unit": "%" | "bps" | "₹ cr" | "$" | "units" | "stores" | null, "direction": "up" | "down" | "flat" | null},
     "applies_to": absolute fiscal period (e.g. "FY27", "Q4 FY27", "FY28"),
     "firmness": "explicit" if it has a number or a date, "soft" if directional,
     "update_of_earlier": true if management is restating, raising, cutting or delaying an earlier target, else false,
