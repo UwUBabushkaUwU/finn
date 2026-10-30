@@ -19,6 +19,9 @@ Rules:
 3. For milestones, use candidate events (E ids). If an event shows "done" on or before deadline -> delivered; if "done" after deadline -> partly ("late by N months"); if deadline passed without update -> unverifiable.
 4. Do NOT judge revisions (revisions are tracked separately in Python).
 5. You MUST return a verdict for EVERY single T id listed below.
+6. Metric guard: aum_growth targets may ONLY use aum_growth evidence, never revenue growth or general revenue.
+7. Scale guard: if an evidence value is more than 10× or less than 0.1× the target (e.g. adding 4 branches vs total of 632), the evidence is not comparable and the verdict must be "unverifiable" ("not comparable").
+8. Segment guard: segment matching must be exact. Evidence for telecom must never be used for IT hardware.
 
 Return JSON:
 {
