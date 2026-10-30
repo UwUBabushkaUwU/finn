@@ -316,7 +316,15 @@ export function cleanEvidenceText(evidence?: string): string {
   // 12. Format percentages to 1 decimal if they have 2+ decimals
   text = text.replace(/(\d+\.\d{2,})%/g, (_, num) => `${parseFloat(num).toFixed(1)}%`);
 
-  // 13. Clean up whitespace
+  // 13. Collapse equal ranges like "1.9–1.9%" -> "1.9%", "40–40 bps" -> "40 bps", "₹1,200–1,200 cr" -> "₹1,200 cr"
+  text = text.replace(/(\d+(?:\.\d+)?)\s*%?\s*[-–—]\s*\1\s*%/g, "$1%");
+  text = text.replace(/(\d+(?:\.\d+)?)\s*(?:bps)?\s*[-–—]\s*\1\s*bps\b/gi, "$1 bps");
+  text = text.replace(/₹\s*(\d[\d,]*(?:\.\d+)?)\s*(?:cr)?\s*[-–—]\s*₹?\s*\1\s*cr\b/gi, "₹$1 cr");
+  text = text.replace(/(\d+(?:\.\d+)?)\s*(?:stores|branches)?\s*[-–—]\s*\1\s*(stores|branches)\b/gi, "$1 $2");
+  text = text.replace(/(\d+(?:\.\d+)?)\s*(?:mn\s+units)?\s*[-–—]\s*\1\s*(mn\s+units)\b/gi, "$1 $2");
+  text = text.replace(/(\d+(?:\.\d+)?)\s*[-–—]\s*\1\b/g, "$1");
+
+  // 14. Clean up whitespace
   text = text.replace(/\s+/g, " ").trim();
   text = text.replace(/\s+([.,;:])/g, "$1");
 

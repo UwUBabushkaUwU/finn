@@ -14,7 +14,6 @@ import {
 import { CompanyHeader } from "@/components/company/CompanyHeader";
 import { ManagementHero } from "@/components/company/ManagementHero";
 import { PromiseList } from "@/components/company/PromiseList";
-import { StoryChanged } from "@/components/company/StoryChanged";
 import { NumbersSection } from "@/components/company/NumbersSection";
 import { BusinessSnapshot } from "@/components/company/BusinessSnapshot";
 import { BullBearSection } from "@/components/company/BullBearSection";
@@ -147,9 +146,6 @@ export default async function CompanyPage({ params }: PageProps) {
           sources={promiseSources}
           meta={meta}
         />
-
-        {/* How the story changed (Guidance timeline revisions) */}
-        <StoryChanged guidanceTimeline={guidanceTimeline} />
 
         {/* The Numbers: 4 tiles, SVG chart, flags */}
         <NumbersSection numbers={numbers} financials={financials} />

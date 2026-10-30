@@ -147,10 +147,16 @@ def build_business_snapshot(ticker: str) -> dict[str, Any]:
 
     cust_markets = response.get("customers_and_markets")
     if cust_markets and isinstance(cust_markets, str):
-        cm_words = cust_markets.strip().split()
-        if len(cm_words) > 25:
-            cust_markets = " ".join(cm_words[:25])
-        response["customers_and_markets"] = cust_markets
+        cm_s = cust_markets.strip()
+        if cm_s.lower() in ("null", "none", "n/a", "na", "nil", "undefined", "—", "-", "not available", "information not available"):
+            response["customers_and_markets"] = None
+        else:
+            cm_words = cm_s.split()
+            if len(cm_words) > 25:
+                cm_s = " ".join(cm_words[:25])
+            response["customers_and_markets"] = cm_s
+    else:
+        response["customers_and_markets"] = None
 
     # Save to research table
     upsert(

@@ -28,20 +28,32 @@ function getChipLabel(
     const target = promises?.targets?.find((t) => t.id === id);
     const pText = verdict?.promise || target?.statement || "";
     const metric = target?.metric || "";
+    const textLower = pText.toLowerCase();
+    const metricLower = metric.toLowerCase();
+
+    if (textLower.includes("disbursal") || metricLower.includes("disbursal")) return "Disbursal guidance";
+    if (textLower.includes("cost of funds") || textLower.includes("cost of borrowing") || metricLower.includes("cost_of_funds")) return "Cost of funds guidance";
+    if (textLower.includes("credit cost") || metricLower.includes("credit_cost")) return "Credit cost guidance";
+    if (textLower.includes("spread")) return "Spread guidance";
+    if (textLower.includes("nim") || metricLower.includes("nim")) return "NIM guidance";
+    if (textLower.includes("aum") || metricLower.includes("aum")) return "AUM growth target";
+    if (textLower.includes("branch") || textLower.includes("store") || metricLower.includes("store")) return "Branch target";
+    if (textLower.includes("capex") || metricLower.includes("capex")) return "Capex guidance";
+    if (textLower.includes("it hardware") || metricLower.includes("it_hardware")) return "IT hardware target";
+    if (textLower.includes("telecom") || metricLower.includes("telecom")) return "Telecom target";
+    if (textLower.includes("mobile") || metricLower.includes("mobile")) return "Mobile target";
+    if (textLower.includes("camera")) return "Camera module target";
+    if (textLower.includes("lighting")) return "Lighting target";
+    if (textLower.includes("order book") || metricLower.includes("order_book")) return "Order book target";
+    if (textLower.includes("margin") || textLower.includes("ebitda") || metricLower.includes("margin")) return "Margin guidance";
+    if (textLower.includes("pat") || textLower.includes("profit") || metricLower.includes("pat")) return "PAT target";
+    if (textLower.includes("revenue") || textLower.includes("sales") || textLower.includes("topline") || metricLower.includes("revenue")) return "Revenue target";
+    if (textLower.includes("volume") || metricLower.includes("volume")) return "Volume target";
+    if (textLower.includes("cagr")) return "CAGR target";
 
     if (pText.includes("50% growth")) return "50% growth promise";
     if (pText.includes("56,000")) return "₹56,000 cr target";
     if (pText.includes("1,200") || pText.includes("1200")) return "₹1,200 cr target";
-    if (pText.toLowerCase().includes("capex")) return "Capex guidance";
-    if (pText.toLowerCase().includes("it hardware") || metric.includes("it_hardware")) return "IT hardware target";
-    if (pText.toLowerCase().includes("telecom") || metric.includes("telecom")) return "Telecom target";
-    if (pText.toLowerCase().includes("mobile") || metric.includes("mobile")) return "Mobile target";
-    if (pText.toLowerCase().includes("camera")) return "Camera module target";
-    if (pText.toLowerCase().includes("lighting")) return "Lighting target";
-    if (pText.toLowerCase().includes("credit cost") || metric.includes("credit_cost")) return "Credit cost guidance";
-    if (pText.toLowerCase().includes("nim") || metric.includes("nim")) return "NIM guidance";
-    if (pText.toLowerCase().includes("aum")) return "AUM growth target";
-    if (pText.toLowerCase().includes("branches") || pText.toLowerCase().includes("store")) return "Branch target";
 
     if (metric) {
       return `${metric.replace(/_/g, " ")} promise`;

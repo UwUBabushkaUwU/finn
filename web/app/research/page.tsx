@@ -157,15 +157,15 @@ export default async function ResearchPage() {
                 const cantVerifyPct = total > 0 ? (company.cantVerifyCount / total) * 100 : 0;
 
                 let summaryText = `${company.keptCount} kept · ${company.brokenCount} broken`;
-                if (company.keptCount === 0 && company.brokenCount === 0) {
+                if (total === 0) {
+                  summaryText = "No dated promises in recent calls";
+                } else if (company.keptCount === 0 && company.brokenCount === 0) {
                   const parts: string[] = [];
                   if (company.tooEarlyCount > 0) parts.push(`${company.tooEarlyCount} too early`);
                   if (company.otherProgressCount > 0) parts.push(`${company.otherProgressCount} on track`);
                   if (company.behindCount > 0) parts.push(`${company.behindCount} behind`);
                   if (company.cantVerifyCount > 0) parts.push(`${company.cantVerifyCount} can't verify`);
-                  if (parts.length > 0) {
-                    summaryText = parts.join(" · ");
-                  }
+                  summaryText = parts.length > 0 ? parts.join(" · ") : "No dated promises in recent calls";
                 }
 
                 return (

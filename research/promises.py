@@ -482,7 +482,15 @@ def clean_money_in_evidence_text(text: str) -> str:
     text = re.sub(r"\brun-rate\s+of\s*₹", "run-rate: ₹", text, flags=re.IGNORECASE)
     text = re.sub(r"\brun-rate:\s*of\b", "run-rate:", text, flags=re.IGNORECASE)
 
-    # 11. Normalize spaces
+    # 11. Collapse equal ranges like '1.9–1.9%' -> '1.9%', '40–40 bps' -> '40 bps', '₹1,200–1,200 cr' -> '₹1,200 cr'
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*%?\s*[-–—]\s*\1\s*%", r"\1%", text)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(?:bps)?\s*[-–—]\s*\1\s*bps\b", r"\1 bps", text, flags=re.IGNORECASE)
+    text = re.sub(r"₹\s*(\d[\d,]*(?:\.\d+)?)\s*(?:cr)?\s*[-–—]\s*₹?\s*\1\s*cr\b", r"₹\1 cr", text, flags=re.IGNORECASE)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(?:stores|branches)?\s*[-–—]\s*\1\s*(stores|branches)\b", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*(?:mn\s+units)?\s*[-–—]\s*\1\s*(mn\s+units)\b", r"\1 \2", text, flags=re.IGNORECASE)
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*[-–—]\s*\1\b", r"\1", text)
+
+    # 12. Normalize spaces
     text = re.sub(r"\s+", " ", text).strip()
     text = re.sub(r"\s+([.,;:!?)])", r"\1", text)
     return text
@@ -1883,11 +1891,15 @@ def format_override_evidence_sentence(
                 guided_str = f"{t_target['value']} bps"
         elif t_target.get("low") is not None and t_target.get("high") is not None:
             try:
-                guided_str = f"{int(round(float(t_target['low'])))}–{int(round(float(t_target['high'])))} bps"
+                l_val = int(round(float(t_target['low'])))
+                h_val = int(round(float(t_target['high'])))
+                guided_str = f"{l_val} bps" if l_val == h_val else f"{l_val}–{h_val} bps"
             except (ValueError, TypeError):
-                guided_str = f"{t_target['low']}–{t_target['high']} bps"
+                guided_str = f"{t_target['low']} bps" if t_target['low'] == t_target['high'] else f"{t_target['low']}–{t_target['high']} bps"
         else:
-            guided_str = f"{int(round(low_f))}–{int(round(high_f))} bps"
+            l_val = int(round(low_f))
+            h_val = int(round(high_f))
+            guided_str = f"{l_val} bps" if l_val == h_val else f"{l_val}–{h_val} bps"
 
         try:
             val_str = f"{int(round(effective_val))} bps"
@@ -1903,9 +1915,11 @@ def format_override_evidence_sentence(
             except (ValueError, TypeError):
                 guided_str = f"{t_target['value']}%"
         elif t_target.get("low") is not None and t_target.get("high") is not None:
-            guided_str = f"{float(t_target['low']):.1f}–{float(t_target['high']):.1f}%"
+            l_val = float(t_target['low'])
+            h_val = float(t_target['high'])
+            guided_str = f"{l_val:.1f}%" if round(l_val, 1) == round(h_val, 1) else f"{l_val:.1f}–{h_val:.1f}%"
         else:
-            guided_str = f"{low_f:.1f}–{high_f:.1f}%"
+            guided_str = f"{low_f:.1f}%" if round(low_f, 1) == round(high_f, 1) else f"{low_f:.1f}–{high_f:.1f}%"
 
         val_str = f"{effective_val:.1f}%"
         res = f"{covers} {metric_name} {val_str} ({eid_str}) vs {guided_str} guided"
@@ -1916,9 +1930,11 @@ def format_override_evidence_sentence(
         if t_target.get("value") is not None:
             guided_str = f"{format_indian_number(t_target['value'])}{u_suffix}"
         elif t_target.get("low") is not None and t_target.get("high") is not None:
-            guided_str = f"{format_indian_number(t_target['low'])}–{format_indian_number(t_target['high'])}{u_suffix}"
+            l_val = t_target['low']
+            h_val = t_target['high']
+            guided_str = f"{format_indian_number(l_val)}{u_suffix}" if l_val == h_val else f"{format_indian_number(l_val)}–{format_indian_number(h_val)}{u_suffix}"
         else:
-            guided_str = f"{format_indian_number(low_f)}–{format_indian_number(high_f)}{u_suffix}"
+            guided_str = f"{format_indian_number(low_f)}{u_suffix}" if low_f == high_f else f"{format_indian_number(low_f)}–{format_indian_number(high_f)}{u_suffix}"
 
         val_str = f"{format_indian_number(effective_val)}{u_suffix}"
         if multiplier > 1.0:

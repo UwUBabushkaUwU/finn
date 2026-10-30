@@ -251,7 +251,7 @@ def generate_bull_bear_case(ticker: str) -> dict[str, Any]:
     response = call_json(
         task="reasoning",
         prompt=prompt,
-        prompt_version="bull_bear_v2",
+        prompt_version="bull_bear_v3",
         use_cache=True,
     )
 

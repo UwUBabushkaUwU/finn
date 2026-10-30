@@ -5,20 +5,36 @@ interface BusinessSnapshotProps {
   meta?: MetaSection | null;
 }
 
+function isValidContent(text?: string | null): boolean {
+  if (!text) return false;
+  const s = text.trim().toLowerCase();
+  if (
+    !s ||
+    s === "null" ||
+    s === "none" ||
+    s === "n/a" ||
+    s === "na" ||
+    s === "nil" ||
+    s === "undefined" ||
+    s === "—" ||
+    s === "-" ||
+    s === "not available" ||
+    s === "information not available" ||
+    s === "not disclosed"
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function BusinessSnapshot({ snapshot, meta }: BusinessSnapshotProps) {
   if (!snapshot) return null;
 
   const { what_it_does, segments = [], customers_and_markets, pages_used = [] } = snapshot;
 
-  const hasWhatItDoes = Boolean(
-    what_it_does && what_it_does.trim() && what_it_does.trim().toLowerCase() !== "none"
-  );
-  const hasSegments = segments.length > 0 && segments.some((s) => s.share_of_revenue != null);
-  const hasCustomers = Boolean(
-    customers_and_markets &&
-      customers_and_markets.trim() &&
-      customers_and_markets.trim().toLowerCase() !== "none"
-  );
+  const hasWhatItDoes = isValidContent(what_it_does);
+  const hasSegments = segments.length > 0 && segments.some((s) => s.share_of_revenue != null && s.share_of_revenue > 0);
+  const hasCustomers = isValidContent(customers_and_markets);
 
   if (!hasWhatItDoes && !hasSegments && !hasCustomers) return null;
 
