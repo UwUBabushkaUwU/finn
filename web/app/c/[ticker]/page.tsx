@@ -41,18 +41,33 @@ export default async function CompanyPage({ params }: PageProps) {
   const { ticker: rawTicker } = await params;
   const ticker = decodeURIComponent(rawTicker).toUpperCase();
 
-  // Run queries in parallel
+  // Run queries in parallel, selecting only the columns used by components
   const [researchRes, priceRes, financialsRes, companyRes, jobRes] = await Promise.all([
-    supabase.from("research").select("*").eq("ticker", ticker),
+    supabase
+      .from("research")
+      .select("section, content, sources")
+      .eq("ticker", ticker),
     supabase
       .from("prices")
-      .select("*")
+      .select("ticker, date, close, pct_change, vol_ratio")
       .eq("ticker", ticker)
       .order("date", { ascending: false })
       .limit(1),
-    supabase.from("financials").select("*").eq("ticker", ticker).maybeSingle(),
-    supabase.from("companies").select("*").eq("ticker", ticker).maybeSingle(),
-    supabase.from("research_jobs").select("*").eq("ticker", ticker).maybeSingle(),
+    supabase
+      .from("financials")
+      .select("ticker, basis, tables")
+      .eq("ticker", ticker)
+      .maybeSingle(),
+    supabase
+      .from("companies")
+      .select("ticker, name, sector, in_portfolio")
+      .eq("ticker", ticker)
+      .maybeSingle(),
+    supabase
+      .from("research_jobs")
+      .select("ticker, status, step, error, started_at, finished_at")
+      .eq("ticker", ticker)
+      .maybeSingle(),
   ]);
 
   const researchRows = researchRes.data || [];
@@ -162,4 +177,3 @@ export default async function CompanyPage({ params }: PageProps) {
     </main>
   );
 }
-

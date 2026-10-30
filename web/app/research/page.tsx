@@ -26,25 +26,21 @@ interface ResearchedCompanyItem {
 }
 
 export default async function ResearchPage() {
-  // 1. Fetch completed research jobs
-  const { data: jobs } = await supabase
-    .from("research_jobs")
-    .select("*")
-    .eq("status", "done");
-
-  const completedTickers = (jobs || []).map((j) => j.ticker);
-
-  // 2. Fetch companies & research rows in parallel
-  const [companiesRes, researchRes] = await Promise.all([
+  // Fetch completed jobs, companies, and research sections in parallel
+  const [jobsRes, companiesRes, researchRes] = await Promise.all([
+    supabase
+      .from("research_jobs")
+      .select("ticker, status, finished_at")
+      .eq("status", "done"),
     supabase.from("companies").select("ticker, name, in_portfolio"),
-    completedTickers.length > 0
-      ? supabase
-          .from("research")
-          .select("ticker, section, content")
-          .in("ticker", completedTickers)
-          .in("section", ["meta", "promises"])
-      : Promise.resolve({ data: [] }),
+    supabase
+      .from("research")
+      .select("ticker, section, content")
+      .in("section", ["meta", "promises"]),
   ]);
+
+  const jobs = jobsRes.data || [];
+  const completedTickersSet = new Set(jobs.map((j) => j.ticker));
 
   const companiesByTicker = new Map(
     (companiesRes.data || []).map((c) => [c.ticker, c])
@@ -52,14 +48,15 @@ export default async function ResearchPage() {
 
   const researchByTicker = new Map<string, { meta?: any; promises?: any }>();
   for (const r of researchRes.data || []) {
+    if (!completedTickersSet.has(r.ticker)) continue;
     const cur = researchByTicker.get(r.ticker) || {};
     if (r.section === "meta") cur.meta = r.content;
     if (r.section === "promises") cur.promises = r.content;
     researchByTicker.set(r.ticker, cur);
   }
 
-  // 3. Assemble and process company items
-  const items: ResearchedCompanyItem[] = (jobs || []).map((job) => {
+  // Assemble and process company items
+  const items: ResearchedCompanyItem[] = jobs.map((job) => {
     const ticker = job.ticker;
     const company = companiesByTicker.get(ticker);
     const research = researchByTicker.get(ticker);
